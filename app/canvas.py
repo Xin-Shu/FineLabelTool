@@ -1,0 +1,713 @@
+from __future__ import annotations
+import os
+from typing import List, Optional
+
+from PyQt5.QtCore import Qt, QRectF, QPointF, pyqtSignal
+from PyQt5.QtGui import (QPainter, QPen, QBrush, QColor, QPixmap,
+                          QFont, QCursor, QPainterPath)
+from PyQt5.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsItem,
+                              QGraphicsPathItem, QGraphicsPixmapItem,
+                              QGraphicsRectItem, QLabel)
+
+from colors import get_color
+from label_io import Box
+
+HANDLE_SIZE = 9   # pixels (scene coords)
+_H_TL, _H_TM, _H_TR = 0, 1, 2
+_H_ML, _H_MR        = 3, 4
+_H_BL, _H_BM, _H_BR = 5, 6, 7
+
+_CURSOR_MAP = {
+    _H_TL: Qt.SizeFDiagCursor, _H_BR: Qt.SizeFDiagCursor,
+    _H_TR: Qt.SizeBDiagCursor, _H_BL: Qt.SizeBDiagCursor,
+    _H_TM: Qt.SizeVerCursor,   _H_BM: Qt.SizeVerCursor,
+    _H_ML: Qt.SizeHorCursor,   _H_MR: Qt.SizeHorCursor,
+}
+
+
+class BoxItem(QGraphicsItem):
+    def __init__(
+        self,
+        box: Box,
+        img_w: int,
+        img_h: int,
+        *,
+        reference_label: Optional[str] = None,
+        on_change_started=None,
+        on_changed=None,
+    ):
+        super().__init__()
+        self.box = box
+        self.img_w = img_w
+        self.img_h = img_h
+        self.reference_label = reference_label
+        self._on_change_started = on_change_started
+        self._on_changed = on_changed
+        self.position_locked = False
+        self.size_locked = False
+        self._active_handle: Optional[int] = None
+        self._drag_start: Optional[QPointF] = None
+        self._orig: Optional[tuple] = None   # (xc, yc, w, h) at drag start
+        self.highlighted: bool = False
+
+        if self.is_reference:
+            self.setAcceptedMouseButtons(Qt.NoButton)
+            self.setZValue(2)
+        else:
+            self.setFlags(QGraphicsItem.ItemIsSelectable)
+            self.setAcceptHoverEvents(True)
+            self.setZValue(self._current_box_z())
+
+    @property
+    def is_reference(self) -> bool:
+        return self.reference_label is not None
+
+    def _current_box_z(self) -> int:
+        return 4 if self.box.identity >= 0 else 3
+
+    def _view_scale(self) -> float:
+        if self.scene() and self.scene().views():
+            transform = self.scene().views()[0].transform()
+            return max(abs(transform.m11()), abs(transform.m22()), 1e-6)
+        return 1.0
+
+    def _handle_size_scene(self) -> float:
+        return HANDLE_SIZE / self._view_scale()
+
+    def set_geometry_locks(self, position_locked: bool, size_locked: bool):
+        self.position_locked = position_locked
+        self.size_locked = size_locked
+        self.setCursor(QCursor(Qt.ArrowCursor))
+        self.update()
+
+    # ------------------------------------------------------------------ geom
+
+    def _pixel_rect(self) -> QRectF:
+        b = self.box
+        x = (b.x_center - b.width  / 2) * self.img_w
+        y = (b.y_center - b.height / 2) * self.img_h
+        return QRectF(x, y, b.width * self.img_w, b.height * self.img_h)
+
+    def _handle_rects(self) -> dict:
+        r = self._pixel_rect()
+        handle_size = self._handle_size_scene()
+        s = handle_size / 2
+        cx, cy = r.center().x(), r.center().y()
+        return {
+            _H_TL: QRectF(r.left()-s,  r.top()-s,    handle_size, handle_size),
+            _H_TM: QRectF(cx-s,        r.top()-s,    handle_size, handle_size),
+            _H_TR: QRectF(r.right()-s, r.top()-s,    handle_size, handle_size),
+            _H_ML: QRectF(r.left()-s,  cy-s,         handle_size, handle_size),
+            _H_MR: QRectF(r.right()-s, cy-s,         handle_size, handle_size),
+            _H_BL: QRectF(r.left()-s,  r.bottom()-s, handle_size, handle_size),
+            _H_BM: QRectF(cx-s,        r.bottom()-s, handle_size, handle_size),
+            _H_BR: QRectF(r.right()-s, r.bottom()-s, handle_size, handle_size),
+        }
+
+    def _handle_at(self, pos: QPointF) -> Optional[int]:
+        for h, rect in self._handle_rects().items():
+            if rect.contains(pos):
+                return h
+        return None
+
+    def boundingRect(self) -> QRectF:
+        pad = self._handle_size_scene() + 2 / self._view_scale()
+        return self._pixel_rect().adjusted(-pad, -pad, pad, pad)
+
+    def shape(self):
+        from PyQt5.QtGui import QPainterPath
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
+
+    # ------------------------------------------------------------------ paint
+
+    def paint(self, painter: QPainter, option, widget=None):
+        r = self._pixel_rect()
+        color = get_color(self.box.identity)
+        selected = self.isSelected()
+        if not self.is_reference:
+            self.setZValue(self._current_box_z())
+
+        # Box outline
+        pen = QPen(color, 3 if selected else 2)
+        if self.is_reference:
+            pen.setWidth(2)
+            pen.setStyle(Qt.DashLine)
+        pen.setCosmetic(False)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(Qt.NoBrush))
+        painter.drawRect(r)
+
+        # Identity label, drawn inside the top-right corner without a filled badge.
+        if self.box.identity >= 0:
+            label = str(self.box.identity)
+            if self.reference_label:
+                label = f"{self.reference_label}:{label}"
+            font = QFont("Monospace", 11, QFont.Bold)
+            if self.is_reference:
+                font.setItalic(True)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            margin = 4
+            tw = fm.boundingRect(label).width()
+            th = fm.height()
+            label_rect = QRectF(
+                r.right() - tw - margin,
+                r.top() + margin,
+                tw,
+                th,
+            )
+            painter.setPen(QPen(color, 1))
+            painter.drawText(label_rect, Qt.AlignRight | Qt.AlignTop, label)
+
+        # Conflict-highlight ring (drawn outside the box rect)
+        if self.highlighted and not self.is_reference:
+            vs = self._view_scale()
+            pad = 4 / vs
+            h_pen = QPen(QColor(255, 100, 0), 4 / vs)
+            h_pen.setStyle(Qt.DashLine)
+            h_pen.setCosmetic(False)
+            painter.setPen(h_pen)
+            painter.setBrush(QBrush(Qt.NoBrush))
+            painter.drawRect(r.adjusted(-pad, -pad, pad, pad))
+
+        # Resize handles (only when selected)
+        if selected and not self.size_locked:
+            painter.setPen(QPen(Qt.white, 1))
+            painter.setBrush(QBrush(color))
+            for hr in self._handle_rects().values():
+                painter.drawRect(hr)
+
+    # ------------------------------------------------------------------ hover
+
+    def hoverMoveEvent(self, event):
+        if self.position_locked and self.size_locked:
+            self.setCursor(QCursor(Qt.ArrowCursor))
+            super().hoverMoveEvent(event)
+            return
+        h = self._handle_at(event.pos())
+        if h is not None and not self.size_locked:
+            self.setCursor(QCursor(_CURSOR_MAP.get(h, Qt.ArrowCursor)))
+        elif self._pixel_rect().contains(event.pos()) and not self.position_locked:
+            self.setCursor(QCursor(Qt.SizeAllCursor))
+        else:
+            self.setCursor(QCursor(Qt.ArrowCursor))
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.setCursor(QCursor(Qt.ArrowCursor))
+        super().hoverLeaveEvent(event)
+
+    # ------------------------------------------------------------------ drag
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            handle = self._handle_at(event.pos())
+            wants_resize = handle is not None
+            wants_move = handle is None and self._pixel_rect().contains(event.pos())
+            if (wants_resize and self.size_locked) or (wants_move and self.position_locked):
+                super().mousePressEvent(event)
+                return
+            self._active_handle = handle
+            self._drag_start = event.scenePos()
+            b = self.box
+            self._orig = (b.x_center, b.y_center, b.width, b.height)
+            if self._on_change_started:
+                self._on_change_started(self.box)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is None:
+            super().mouseMoveEvent(event)
+            return
+
+        delta = event.scenePos() - self._drag_start
+        xc0, yc0, w0, h0 = self._orig
+
+        # Convert orig box to pixel rect
+        x0 = (xc0 - w0 / 2) * self.img_w
+        y0 = (yc0 - h0 / 2) * self.img_h
+        w0p = w0 * self.img_w
+        h0p = h0 * self.img_h
+        r = QRectF(x0, y0, w0p, h0p)
+
+        dx, dy = delta.x(), delta.y()
+        h = self._active_handle
+
+        if h is None:
+            if self.position_locked:
+                super().mouseMoveEvent(event)
+                return
+            r.translate(dx, dy)
+        else:
+            if self.size_locked:
+                super().mouseMoveEvent(event)
+                return
+            if h in (_H_TL, _H_TM, _H_TR):
+                r.setTop(r.top() + dy)
+            if h in (_H_BL, _H_BM, _H_BR):
+                r.setBottom(r.bottom() + dy)
+            if h in (_H_TL, _H_ML, _H_BL):
+                r.setLeft(r.left() + dx)
+            if h in (_H_TR, _H_MR, _H_BR):
+                r.setRight(r.right() + dx)
+            r = r.normalized()
+
+        # Clamp to image
+        img_rect = QRectF(0, 0, self.img_w, self.img_h)
+        r = r.intersected(img_rect)
+        if r.width() < 2 or r.height() < 2:
+            return
+
+        self.prepareGeometryChange()
+        b = self.box
+        b.x_center = (r.left() + r.width()  / 2) / self.img_w
+        b.y_center = (r.top()  + r.height() / 2) / self.img_h
+        b.width    = r.width()  / self.img_w
+        b.height   = r.height() / self.img_h
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        changed = False
+        if self._orig is not None:
+            b = self.box
+            changed = (b.x_center, b.y_center, b.width, b.height) != self._orig
+        self._drag_start = None
+        self._active_handle = None
+        self._orig = None
+        if changed and self._on_changed:
+            self._on_changed(self.box)
+        super().mouseReleaseEvent(event)
+
+
+# ---------------------------------------------------------------------------
+
+class ImageCanvas(QGraphicsView):
+    box_selected   = pyqtSignal(object)   # emits Box
+    box_deselected = pyqtSignal()
+    box_change_started = pyqtSignal(object)
+    box_changed    = pyqtSignal(object)
+    box_drawn      = pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setBackgroundBrush(QBrush(QColor(35, 35, 35)))
+        self._try_enable_opengl_viewport()
+        self._overlay_badge = QLabel(self)
+        self._overlay_badge.setStyleSheet(self._notice_style("overlay"))
+        self._overlay_badge.hide()
+        self._minimap = QLabel(self)
+        self._minimap.setStyleSheet(
+            "background: rgba(17, 24, 39, 190); border: 1px solid #f8fafc;"
+        )
+        self._minimap.setFixedSize(190, 110)
+        self._minimap.hide()
+
+        self._box_items: List[BoxItem] = []
+        self._reference_items: List[BoxItem] = []
+        self._trajectory_items: List[QGraphicsItem] = []
+        self._frame_pixmap: Optional[QPixmap] = None
+        self._minimap_base: Optional[QPixmap] = None
+        self._minimap_base_offset = QPointF(0, 0)
+        self._img_w = 1
+        self._img_h = 1
+        self._boxes_locked = False
+        self._position_locked = False
+        self._size_locked = False
+        self._panning = False
+        self._pan_start = None
+        self._pan_h0 = 0
+        self._pan_v0 = 0
+        self._overlay_active = False
+        self._draw_mode = False
+        self._draw_start: Optional[QPointF] = None
+        self._draw_item: Optional[QGraphicsRectItem] = None
+
+        self.horizontalScrollBar().valueChanged.connect(self._update_minimap)
+        self.verticalScrollBar().valueChanged.connect(self._update_minimap)
+
+    def _try_enable_opengl_viewport(self):
+        if os.environ.get("APP_LABEL_USE_OPENGL") != "1":
+            return
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return
+        try:
+            from PyQt5.QtWidgets import QOpenGLWidget
+            self.setViewport(QOpenGLWidget())
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ public
+
+    def clear_selection(self):
+        self._scene.clearSelection()
+        self.box_deselected.emit()
+
+    def highlight_box(self, box: Box):
+        self.clear_highlight()
+        for item in self._box_items:
+            if item.box is box:
+                item.highlighted = True
+                item.update()
+                break
+
+    def clear_highlight(self):
+        for item in self._box_items:
+            if item.highlighted:
+                item.highlighted = False
+                item.update()
+
+    def load_frame(self, pixmap: QPixmap, boxes: List[Box], keep_zoom: bool = False):
+        old_transform = self.transform() if keep_zoom else None
+        old_center = self.mapToScene(self.viewport().rect().center()) if keep_zoom else None
+
+        self._scene.clear()
+        self._box_items.clear()
+        self._reference_items.clear()
+        self._trajectory_items.clear()
+        self._draw_item = None
+        self._draw_start = None
+        self._panning = False
+        self._pan_start = None
+        self.setCursor(QCursor(Qt.ArrowCursor))
+
+        self._img_w = pixmap.width()
+        self._img_h = pixmap.height()
+        self._frame_pixmap = pixmap
+        self._minimap_base = None
+
+        self._scene.addItem(QGraphicsPixmapItem(pixmap))
+        for box in boxes:
+            item = BoxItem(
+                box,
+                self._img_w,
+                self._img_h,
+                on_change_started=self.box_change_started.emit,
+                on_changed=self.box_changed.emit,
+            )
+            item.set_geometry_locks(self._position_locked, self._size_locked)
+            self._scene.addItem(item)
+            self._box_items.append(item)
+
+        self._scene.setSceneRect(0, 0, self._img_w, self._img_h)
+
+        if keep_zoom and old_transform is not None:
+            self.setTransform(old_transform)
+            self.centerOn(old_center)
+        else:
+            self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+        self._update_minimap()
+
+    def fit_view(self):
+        if self._overlay_active:
+            return
+        scene_rect = self._scene.sceneRect()
+        if scene_rect.isEmpty() or self._frame_pixmap is None:
+            return
+        self.fitInView(scene_rect, Qt.KeepAspectRatio)
+        self._update_minimap()
+
+    def refresh_boxes(self):
+        for item in self._box_items:
+            item.prepareGeometryChange()
+            item.update()
+
+    def set_boxes_locked(self, locked: bool):
+        self.set_geometry_locks(locked, locked)
+
+    def set_geometry_locks(self, position_locked: bool, size_locked: bool):
+        self._position_locked = position_locked
+        self._size_locked = size_locked
+        self._boxes_locked = position_locked and size_locked
+        for item in self._box_items:
+            item.set_geometry_locks(position_locked, size_locked)
+
+    def set_current_boxes_visible(self, visible: bool):
+        for item in self._box_items:
+            item.setOpacity(1.0 if visible else 0.0)
+            item.setEnabled(visible)
+
+    def is_interacting(self) -> bool:
+        if self._panning or self._draw_mode or self._draw_item is not None:
+            return True
+        return any(item._drag_start is not None for item in self._box_items)
+
+    def show_reference_boxes(self, boxes: List[Box], label: str):
+        self.clear_reference_boxes()
+        self._overlay_active = True
+        self._panning = False
+        for box in boxes:
+            item = BoxItem(
+                box,
+                self._img_w,
+                self._img_h,
+                reference_label=label,
+            )
+            self._scene.addItem(item)
+            self._reference_items.append(item)
+
+    def show_trajectory(self, boxes: List[Box], identity: int):
+        self.clear_reference_boxes()
+        if not boxes:
+            return
+        self._overlay_active = True
+        self._panning = False
+        color = get_color(identity)
+        centers = []
+        for box in boxes:
+            item = BoxItem(
+                box,
+                self._img_w,
+                self._img_h,
+                reference_label="track",
+            )
+            self._scene.addItem(item)
+            self._reference_items.append(item)
+            centers.append(QPointF(box.x_center * self._img_w, box.y_center * self._img_h))
+
+        if len(centers) >= 2:
+            path = QPainterPath(centers[0])
+            for point in centers[1:]:
+                path.lineTo(point)
+            line = QGraphicsPathItem(path)
+            pen = QPen(color, 2)
+            pen.setStyle(Qt.DotLine)
+            line.setPen(pen)
+            line.setZValue(2.5)
+            self._scene.addItem(line)
+            self._trajectory_items.append(line)
+        self.set_overlay_notice(f"Trajectory: ID {identity}")
+
+    def _notice_style(self, kind: str) -> str:
+        if kind == "warning":
+            return (
+                "background: #dc2626; color: #ffffff; border: 1px solid #7f1d1d; "
+                "border-radius: 4px; padding: 5px 9px; font-weight: 800; "
+                "font-size: 13px;"
+            )
+        return (
+            "background: #ffd166; color: #111827; border: 1px solid #9a6700; "
+            "border-radius: 4px; padding: 5px 9px; font-weight: 800; "
+            "font-size: 13px;"
+        )
+
+    def set_overlay_notice(self, text: str):
+        self._set_notice(text, "overlay")
+
+    def set_warning_notice(self, text: str):
+        self._set_notice(text, "warning")
+
+    def _set_notice(self, text: str, kind: str):
+        if text:
+            self._overlay_badge.setStyleSheet(self._notice_style(kind))
+            self._overlay_badge.setText(text)
+            self._overlay_badge.adjustSize()
+            self._position_overlay_badge()
+            self._overlay_badge.show()
+            self._overlay_badge.raise_()
+        else:
+            self._overlay_badge.hide()
+
+    def clear_reference_boxes(self):
+        for item in self._reference_items:
+            if item.scene() is self._scene:
+                self._scene.removeItem(item)
+        self._reference_items.clear()
+        for item in self._trajectory_items:
+            if item.scene() is self._scene:
+                self._scene.removeItem(item)
+        self._trajectory_items.clear()
+        self._overlay_active = False
+        self.set_overlay_notice("")
+
+    def set_draw_mode(self, enabled: bool):
+        self._draw_mode = enabled
+        self.setCursor(QCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor))
+        if not enabled:
+            self._draw_start = None
+            if self._draw_item is not None:
+                self._scene.removeItem(self._draw_item)
+                self._draw_item = None
+
+    def get_selected_box(self) -> Optional[Box]:
+        for item in self._box_items:
+            if item.isSelected():
+                return item.box
+        return None
+
+    # ------------------------------------------------------------------ events
+
+    def wheelEvent(self, event):
+        if self._overlay_active:
+            event.ignore()
+            return
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.scale(factor, factor)
+        self._update_minimap()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_overlay_badge()
+        self._position_minimap()
+        self._update_minimap()
+
+    def _position_overlay_badge(self):
+        if not self._overlay_badge.isVisible():
+            return
+        margin = 12
+        x = self.viewport().width() - self._overlay_badge.width() - margin
+        self._overlay_badge.move(max(margin, x), margin)
+
+    def _position_minimap(self):
+        margin = 12
+        self._minimap.move(
+            self.viewport().width() - self._minimap.width() - margin,
+            self.viewport().height() - self._minimap.height() - margin,
+        )
+
+    def _update_minimap(self):
+        if self._frame_pixmap is None or self._scene.sceneRect().isEmpty():
+            self._minimap.hide()
+            return
+
+        visible = self.mapToScene(self.viewport().rect()).boundingRect()
+        scene_rect = self._scene.sceneRect()
+        if visible.width() >= scene_rect.width() * 0.98 and visible.height() >= scene_rect.height() * 0.98:
+            self._minimap.hide()
+            return
+
+        if self._minimap_base is None:
+            base = QPixmap(self._minimap.size())
+            base.fill(QColor(17, 24, 39, 210))
+            scaled = self._frame_pixmap.scaled(
+                self._minimap.width() - 12,
+                self._minimap.height() - 12,
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation,
+            )
+            if scaled.isNull():
+                self._minimap.hide()
+                return
+            ox = (self._minimap.width() - scaled.width()) // 2
+            oy = (self._minimap.height() - scaled.height()) // 2
+            painter = QPainter(base)
+            try:
+                painter.drawPixmap(ox, oy, scaled)
+            finally:
+                painter.end()
+            self._minimap_base = base
+            self._minimap_base_offset = QPointF(ox, oy)
+
+        canvas = QPixmap(self._minimap_base)
+        scaled_w = self._minimap_base.width() - 12
+        scaled_h = self._minimap_base.height() - 12
+        if scaled_w <= 0 or scaled_h <= 0:
+            self._minimap.hide()
+            return
+        ox = self._minimap_base_offset.x()
+        oy = self._minimap_base_offset.y()
+        draw_w = self._minimap_base.width() - 2 * ox
+        draw_h = self._minimap_base.height() - 2 * oy
+
+        sx = draw_w / scene_rect.width()
+        sy = draw_h / scene_rect.height()
+        vr = QRectF(
+            ox + visible.left() * sx,
+            oy + visible.top() * sy,
+            visible.width() * sx,
+            visible.height() * sy,
+        ).intersected(QRectF(ox, oy, draw_w, draw_h))
+        painter = QPainter(canvas)
+        try:
+            painter.setPen(QPen(QColor(255, 209, 102), 2))
+            painter.setBrush(QBrush(Qt.NoBrush))
+            painter.drawRect(vr)
+        finally:
+            painter.end()
+
+        self._minimap.setPixmap(canvas)
+        self._position_minimap()
+        self._minimap.show()
+        self._minimap.raise_()
+
+    def mousePressEvent(self, event):
+        if self._draw_mode and event.button() == Qt.LeftButton and self._frame_pixmap is not None:
+            self._draw_start = self.mapToScene(event.pos())
+            self._draw_item = QGraphicsRectItem(QRectF(self._draw_start, self._draw_start))
+            pen = QPen(QColor(255, 209, 102), 2)
+            pen.setStyle(Qt.DashLine)
+            self._draw_item.setPen(pen)
+            self._draw_item.setBrush(QBrush(Qt.NoBrush))
+            self._draw_item.setZValue(6)
+            self._scene.addItem(self._draw_item)
+            event.accept()
+            return
+        if event.button() == Qt.MiddleButton:
+            self._panning = True
+            self._pan_start = event.pos()
+            self._pan_h0 = self.horizontalScrollBar().value()
+            self._pan_v0 = self.verticalScrollBar().value()
+            self.setCursor(QCursor(Qt.ClosedHandCursor))
+            event.accept()
+            return
+        item = self.itemAt(event.pos())
+        if isinstance(item, BoxItem) and not item.is_reference:
+            selected = [box_item for box_item in self._box_items if box_item.isSelected()]
+            if selected and item not in selected:
+                event.accept()
+                return
+            self.box_selected.emit(item.box)
+        else:
+            self._scene.clearSelection()
+            self.box_deselected.emit()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._draw_mode and self._draw_item is not None and self._draw_start is not None:
+            current = self.mapToScene(event.pos())
+            img_rect = QRectF(0, 0, self._img_w, self._img_h)
+            rect = QRectF(self._draw_start, current).normalized().intersected(img_rect)
+            self._draw_item.setRect(rect)
+            event.accept()
+            return
+        if self._panning and self._pan_start is not None:
+            delta = event.pos() - self._pan_start
+            self.horizontalScrollBar().setValue(self._pan_h0 - delta.x())
+            self.verticalScrollBar().setValue(self._pan_v0 - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._draw_mode and event.button() == Qt.LeftButton and self._draw_item is not None:
+            rect = self._draw_item.rect().normalized()
+            self._scene.removeItem(self._draw_item)
+            self._draw_item = None
+            self._draw_start = None
+            if rect.width() >= 2 and rect.height() >= 2:
+                box = Box(
+                    x_center=(rect.left() + rect.width() / 2) / self._img_w,
+                    y_center=(rect.top() + rect.height() / 2) / self._img_h,
+                    width=rect.width() / self._img_w,
+                    height=rect.height() / self._img_h,
+                    confidence=1.0,
+                    class_id=0,
+                    identity=-1,
+                )
+                self.box_drawn.emit(box)
+            event.accept()
+            return
+        if event.button() == Qt.MiddleButton and self._panning:
+            self._panning = False
+            self._pan_start = None
+            self.setCursor(QCursor(Qt.ArrowCursor))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

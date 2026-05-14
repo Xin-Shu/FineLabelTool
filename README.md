@@ -81,8 +81,8 @@ This is annotation work that actually feels good to do.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/<your-username>/app_label_and_track.git
-cd app_label_and_track
+git clone https://github.com/Xin-Shu/FineLabelTool.git
+cd FineLabelTool
 
 # 2. (Recommended) Create and activate a virtual environment
 python -m venv .venv
@@ -190,7 +190,7 @@ A typical frame-by-frame tracking session looks like this:
 ## Project Structure
 
 ```
-app_label_and_track/
+FineLabelTool/
 ├── app/
 │   ├── main.py            # Entry point
 │   ├── main_window.py     # Application logic and UI orchestration

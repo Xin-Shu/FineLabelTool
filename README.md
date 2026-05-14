@@ -42,6 +42,7 @@ Multi-object tracking annotation needs more than drawing boxes. It also needs **
 ### Annotation
 - **Draw, move, resize, copy, and paste boxes** directly on the canvas
 - **Assign tracking IDs** with keyboard-first controls
+- **Assign the next unused ID** with the `New ID` button
 - **Lock box position or size** independently when needed
 - **Undo recent edits** on each frame with `Ctrl+Z`
 
@@ -49,12 +50,14 @@ Multi-object tracking annotation needs more than drawing boxes. It also needs **
 - **Same-frame conflict detection** shows when an ID is already in use
 - **Past trajectory review** helps check whether an ID belongs to the same object
 - **OmniSORT-based ID suggestion** propagates IDs from the previous completed frame
+- **ID Summary against previous frame** shows added, disappeared, stayed, and unassigned IDs with sanity checks
 
 **About OmniSORT.** Label & Track uses a lightweight, interactive adaptation of OmniSORT for annotation-time ID suggestion. Instead of running a full tracker across the entire sequence, it matches the current frame's unassigned boxes against identities from the previous completed frame and proposes one-to-one assignments to speed up manual labeling. The original OmniSORT tracker is also publicly available at [Xin-Shu/OmniSORT](https://github.com/Xin-Shu/OmniSORT).
 
 ### Navigation & Overlays
 - **Frame timeline** with async thumbnail loading and completion indicators
 - **Jump to any frame** directly by number (Ctrl+G)
+- **Direct navigation** jumps to unassigned boxes or the last location of disappeared IDs
 - **Hold Q** to ghost the previous frame's boxes over the current view
 - **Hold W** to ghost the next frame's boxes over the current view
 - **Hold D** to overlay the raw detector output for the current frame
@@ -62,9 +65,12 @@ Multi-object tracking annotation needs more than drawing boxes. It also needs **
 - **Minimap** appears when zoomed in
 
 ### Workflow
-- **Mark frame as completed** with `Ctrl+Enter`
+- **Searchable dataset picker** with screen-aware sizing
+- **Mark frame as completed** with `Ctrl+Enter`; labels are saved immediately
+- **Sanity-gated completion** auto-marks a saved frame completed only when all checks pass
 - **Dataset switching** with unsaved-change protection
 - **Auto-skips to first unlabelled frame** when loading a dataset
+- **Customizable hotkeys** from the in-app Hotkeys dialog
 - **HUD warning badges** on the canvas for all conflict and overlay states
 
 ---
@@ -173,11 +179,11 @@ A typical session looks like this:
 3. **Assign IDs** — click a box, enter the identity in the sidebar, and press `Enter` or click *Assign ID*.
    - If the same ID already exists in the frame, the conflict is highlighted.
    - If the ID was previously used by a different object, the past trajectory is shown before confirmation.
-4. **Add missing boxes** — press `B` (or click *Draw Box*), drag a rectangle on the canvas, then assign an ID.
-5. **Use ID suggestions** — click *Suggest IDs* in the *ID Suggestions* panel to auto-propagate IDs from the previous completed frame using the app's interactive OmniSORT-based matcher.
-6. **Compare with adjacent frames** — hold `Q` or `W` to ghost the previous or next frame's boxes over the current view. This helps verify spatial consistency without navigating away.
-7. **Mark complete** — press `Ctrl+Enter` when a frame is fully annotated. The frame turns green in the timeline and the labels are saved to `label_gt/`.
-8. **Save at any time** — press `Ctrl+S`.
+4. **Find unfinished work** — use *Direct* beside *Unassigned* to jump to unlabelled boxes, or beside *Disappeared* to inspect where a missing ID was last seen in the previous frame.
+5. **Add missing boxes** — press `B` (or click *Draw Box*), drag a rectangle on the canvas, then assign an ID.
+6. **Use ID suggestions** — click *Suggest IDs* in the *ID Suggestions* panel to auto-propagate IDs from the previous completed frame using the app's interactive OmniSORT-based matcher.
+7. **Compare with adjacent frames** — hold `Q` or `W` to ghost the previous or next frame's boxes over the current view. This helps verify spatial consistency without navigating away.
+8. **Save or complete** — press `Ctrl+S` to save. If the frame passes sanity checks, it is automatically marked completed. Pressing `Ctrl+Enter` also saves first, then completes only when sanity checks pass.
 
 ---
 

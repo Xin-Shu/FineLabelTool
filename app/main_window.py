@@ -3,13 +3,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, QSize, QSettings, Qt, QTimer
 from PyQt5.QtGui import QFont, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QInputDialog,
-    QLabel, QApplication, QComboBox, QLineEdit, QListWidget, QMainWindow,
-    QMessageBox, QPushButton, QScrollArea, QShortcut, QSplitter, QStatusBar,
-    QVBoxLayout, QWidget,
+    QLabel, QApplication, QComboBox, QHeaderView, QKeySequenceEdit, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
+    QScrollArea, QShortcut, QSplitter, QStatusBar, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from canvas import ImageCanvas
@@ -23,25 +24,92 @@ from label_io import (
 from timeline import TimelineWidget
 
 
+HOTKEY_DEFS = [
+    ("prev_frame", "Previous frame", "Left"),
+    ("next_frame", "Next frame", "Right"),
+    ("save", "Save current frame", "Ctrl+S"),
+    ("complete", "Toggle frame completion", "Ctrl+Return"),
+    ("fit_view", "Fit image to view", "F"),
+    ("draw_box", "Draw box mode", "B"),
+    ("delete_box", "Delete selected box", "Del"),
+    ("copy", "Copy selected box", "Ctrl+C"),
+    ("paste", "Paste copied box", "Ctrl+V"),
+    ("undo", "Undo current-frame edit", "Ctrl+Z"),
+    ("goto_frame", "Go to frame", "Ctrl+G"),
+    ("ui_zoom_in", "Zoom UI in", "Ctrl+="),
+    ("ui_zoom_out", "Zoom UI out", "Ctrl+-"),
+    ("ui_zoom_reset", "Reset UI zoom", "Ctrl+0"),
+    ("overlay_prev", "Hold previous-frame overlay", "Q"),
+    ("overlay_next", "Hold next-frame overlay", "W"),
+    ("overlay_det", "Hold detection overlay", "D"),
+]
+
+
+HOTKEY_DEFAULTS = {key: default for key, _, default in HOTKEY_DEFS}
+
+
 class DatasetDialog(QDialog):
     def __init__(self, datasets: List[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Dataset")
         self.selected: Optional[str] = None
+        self._datasets = list(datasets)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Choose a dataset to label:"))
+        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("Choose a dataset")
+        title_font = QFont(QApplication.font())
+        title_font.setBold(True)
+        title_font.setPointSizeF(title_font.pointSizeF() + 3)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("Filter datasets...")
+        self._filter.textChanged.connect(self._apply_filter)
+        layout.addWidget(self._filter)
 
         self._list = QListWidget()
-        self._list.addItems(datasets)
+        self._list.setAlternatingRowColors(True)
+        self._list.setUniformItemSizes(True)
+        for name in datasets:
+            item = QListWidgetItem(name)
+            item.setSizeHint(QSize(0, 36))
+            self._list.addItem(item)
         self._list.itemDoubleClicked.connect(self._accept)
         layout.addWidget(self._list)
+
+        self._count_label = QLabel()
+        layout.addWidget(self._count_label)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+        self.setStyleSheet("""
+            QDialog { background: #eef1f4; color: #111827; }
+            QLineEdit {
+                background: #ffffff; border: 1px solid #b8c2cc;
+                border-radius: 6px; padding: 7px 9px;
+            }
+            QListWidget {
+                background: #ffffff; border: 1px solid #c8d0d9;
+                border-radius: 8px; padding: 5px; outline: 0;
+            }
+            QListWidget::item {
+                border-radius: 6px; padding: 6px 9px;
+            }
+            QListWidget::item:selected {
+                background: #dbeafe; color: #0f172a;
+            }
+            QListWidget::item:hover {
+                background: #edf5ff;
+            }
+        """)
         self._fit_to_screen()
+        self._apply_filter("")
 
     def _fit_to_screen(self):
         screen = self.screen() or QApplication.primaryScreen()
@@ -53,16 +121,119 @@ class DatasetDialog(QDialog):
         h = min(max(320, int(available.height() * 0.45)), int(available.height() * 0.80))
         self.setMinimumSize(min(380, w), min(280, h))
         self.resize(w, h)
+        font = QFont(QApplication.font())
+        base = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
+        font.setPointSizeF(min(18.0, max(base + 1.0, h / 38.0)))
+        self.setFont(font)
         self.move(
             available.x() + (available.width() - w) // 2,
             available.y() + (available.height() - h) // 2,
         )
 
+    def _apply_filter(self, text: str):
+        needle = text.strip().lower()
+        visible = 0
+        first_visible = None
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            match = needle in item.text().lower()
+            item.setHidden(not match)
+            if match:
+                visible += 1
+                if first_visible is None:
+                    first_visible = item
+        if first_visible is not None and not self._list.selectedItems():
+            self._list.setCurrentItem(first_visible)
+        self._count_label.setText(f"{visible} dataset(s)")
+
     def _accept(self):
-        items = self._list.selectedItems()
-        if items:
-            self.selected = items[0].text()
+        items = [item for item in self._list.selectedItems() if not item.isHidden()]
+        item = items[0] if items else self._list.currentItem()
+        if item is not None and not item.isHidden():
+            self.selected = item.text()
             self.accept()
+
+
+class HotkeyDialog(QDialog):
+    def __init__(self, hotkeys: Dict[str, str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Hotkeys")
+        self._edits: Dict[str, QKeySequenceEdit] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+
+        title = QLabel("Keyboard Shortcuts")
+        title_font = QFont(QApplication.font())
+        title_font.setBold(True)
+        title_font.setPointSizeF(title_font.pointSizeF() + 2)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        self._table = QTableWidget(len(HOTKEY_DEFS), 3)
+        self._table.setHorizontalHeaderLabels(["Action", "Shortcut", "Default"])
+        self._table.verticalHeader().hide()
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionMode(QTableWidget.NoSelection)
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+
+        for row, (key, label, default) in enumerate(HOTKEY_DEFS):
+            action_item = QTableWidgetItem(label)
+            default_item = QTableWidgetItem(default)
+            action_item.setFlags(action_item.flags() & ~Qt.ItemIsEditable)
+            default_item.setFlags(default_item.flags() & ~Qt.ItemIsEditable)
+            edit = QKeySequenceEdit(QKeySequence(hotkeys.get(key, default)))
+            if hasattr(edit, "setMaximumSequenceLength"):
+                edit.setMaximumSequenceLength(1)
+            self._edits[key] = edit
+            self._table.setItem(row, 0, action_item)
+            self._table.setCellWidget(row, 1, edit)
+            self._table.setItem(row, 2, default_item)
+
+        self._table.resizeRowsToContents()
+        layout.addWidget(self._table, 1)
+
+        self._hint = QLabel("Changes are saved for this user and applied immediately after OK.")
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        restore = btns.button(QDialogButtonBox.RestoreDefaults)
+        if restore is not None:
+            restore.clicked.connect(self._restore_defaults)
+        layout.addWidget(btns)
+
+        self._fit_to_screen()
+
+    def _fit_to_screen(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            self.resize(680, 520)
+            return
+        available = screen.availableGeometry()
+        w = min(max(640, int(available.width() * 0.38)), int(available.width() * 0.85))
+        h = min(max(500, int(available.height() * 0.68)), int(available.height() * 0.88))
+        self.resize(w, h)
+        self.move(
+            available.x() + (available.width() - w) // 2,
+            available.y() + (available.height() - h) // 2,
+        )
+
+    def _restore_defaults(self):
+        for key, _, default in HOTKEY_DEFS:
+            self._edits[key].setKeySequence(QKeySequence(default))
+
+    def hotkeys(self) -> Dict[str, str]:
+        values = {}
+        for key, edit in self._edits.items():
+            values[key] = edit.keySequence().toString(QKeySequence.PortableText)
+        return values
 
 
 class MainWindow(QMainWindow):
@@ -83,7 +254,11 @@ class MainWindow(QMainWindow):
         self._pending_id_confirm: Optional[int] = None
         self._current_boxes_hidden_for_overlay = False
         self._first_load = True
+        self._direct_unassigned_cursor = 0
+        self._direct_disappeared_cursor = 0
         self._shortcuts: List[QShortcut] = []
+        self._settings = QSettings("Xin-Shu", "FineLabelTool")
+        self._hotkeys = self._load_hotkeys()
         font = QApplication.font()
         self._base_font_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
         self._ui_zoom = 1.0
@@ -239,7 +414,14 @@ class MainWindow(QMainWindow):
         self._btn_assign.setEnabled(False)
         self._btn_assign.setToolTip("Assign the typed ID to the selected box (Enter)")
         self._btn_assign.clicked.connect(self._assign_identity)
-        bg.addWidget(self._btn_assign)
+        assign_row = QHBoxLayout()
+        assign_row.addWidget(self._btn_assign, 1)
+        self._btn_assign_next_id = QPushButton("New ID: -")
+        self._btn_assign_next_id.setEnabled(False)
+        self._btn_assign_next_id.setToolTip("Assign the next unused tracking ID")
+        self._btn_assign_next_id.clicked.connect(self._assign_next_identity)
+        assign_row.addWidget(self._btn_assign_next_id)
+        bg.addLayout(assign_row)
 
         self._btn_remove_id = QPushButton("Clear Identity")
         self._btn_remove_id.setEnabled(False)
@@ -269,18 +451,18 @@ class MainWindow(QMainWindow):
 
         self._btn_complete = QPushButton("Mark Completed")
         self._btn_complete.setCheckable(True)
-        self._btn_complete.setToolTip("Mark this frame as fully annotated and save (Ctrl+Enter / Cmd+Enter)")
+        self._btn_complete.setToolTip("Mark this frame as fully annotated and save")
         self._btn_complete.clicked.connect(self._toggle_completed)
         fg.addWidget(self._btn_complete)
 
-        self._btn_save = QPushButton("Save  (Ctrl+S)")
-        self._btn_save.setToolTip("Save annotations for the current frame (Ctrl+S)")
+        self._btn_save = QPushButton("Save")
+        self._btn_save.setToolTip("Save annotations for the current frame")
         self._btn_save.clicked.connect(self._save_current)
         fg.addWidget(self._btn_save)
 
-        self._btn_draw_box = QPushButton("Draw Box  (B)")
+        self._btn_draw_box = QPushButton("Draw Box")
         self._btn_draw_box.setCheckable(True)
-        self._btn_draw_box.setToolTip("Draw a new bounding box on the image (B key, Escape to cancel)")
+        self._btn_draw_box.setToolTip("Draw a new bounding box on the image")
         self._btn_draw_box.toggled.connect(self._toggle_draw_box)
         fg.addWidget(self._btn_draw_box)
 
@@ -302,23 +484,19 @@ class MainWindow(QMainWindow):
         ng.addLayout(row2)
 
         btn_fit = QPushButton("Fit View  (F)")
-        btn_fit.setToolTip("Fit the image to the viewport (F key)")
+        btn_fit.setToolTip("Fit the image to the viewport")
         btn_fit.clicked.connect(self._canvas.fit_view)
         ng.addWidget(btn_fit)
-
-        lbl_overlay = QLabel(
-            "Hold Q: prev boxes  |  Hold W: next\n"
-            "Hold D: detections\n"
-            "B: draw box  |  Del: delete box\n"
-            "Ctrl+G: go to frame"
-        )
-        lbl_overlay.setWordWrap(True)
-        ng.addWidget(lbl_overlay)
 
         btn_open = QPushButton("Open Dataset…")
         btn_open.setToolTip("Switch to a different dataset")
         btn_open.clicked.connect(self._select_dataset)
         ng.addWidget(btn_open)
+
+        btn_hotkeys = QPushButton("Hotkeys...")
+        btn_hotkeys.setToolTip("View and customize keyboard shortcuts")
+        btn_hotkeys.clicked.connect(self._open_hotkey_dialog)
+        ng.addWidget(btn_hotkeys)
 
         layout.addWidget(nav_grp)
 
@@ -335,6 +513,34 @@ class MainWindow(QMainWindow):
 
         summary_grp = QGroupBox("ID Summary (against prev)")
         sg = QVBoxLayout(summary_grp)
+        unassigned_row = QHBoxLayout()
+        self._lbl_unassigned_title = QLabel("<b>Unassigned</b>")
+        self._lbl_unassigned_title.setTextFormat(Qt.RichText)
+        self._lbl_unassigned_value = QLabel("- / -")
+        self._lbl_unassigned_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._btn_direct_unassigned = QPushButton("Direct")
+        self._btn_direct_unassigned.setEnabled(False)
+        self._btn_direct_unassigned.setToolTip("Jump to the next unassigned box")
+        self._btn_direct_unassigned.clicked.connect(self._direct_unassigned_box)
+        unassigned_row.addWidget(self._lbl_unassigned_title)
+        unassigned_row.addStretch()
+        unassigned_row.addWidget(self._lbl_unassigned_value)
+        unassigned_row.addWidget(self._btn_direct_unassigned)
+        sg.addLayout(unassigned_row)
+        disappeared_row = QHBoxLayout()
+        self._lbl_disappeared_title = QLabel("<b>Disappeared</b>")
+        self._lbl_disappeared_title.setTextFormat(Qt.RichText)
+        self._lbl_disappeared_value = QLabel("0")
+        self._lbl_disappeared_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._btn_direct_disappeared = QPushButton("Direct")
+        self._btn_direct_disappeared.setEnabled(False)
+        self._btn_direct_disappeared.setToolTip("Jump to where the next disappeared ID was last seen")
+        self._btn_direct_disappeared.clicked.connect(self._direct_disappeared_box)
+        disappeared_row.addWidget(self._lbl_disappeared_title)
+        disappeared_row.addStretch()
+        disappeared_row.addWidget(self._lbl_disappeared_value)
+        disappeared_row.addWidget(self._btn_direct_disappeared)
+        sg.addLayout(disappeared_row)
         self._lbl_id_summary = QLabel("No dataset loaded.")
         self._lbl_id_summary.setTextFormat(Qt.RichText)
         self._lbl_id_summary.setWordWrap(True)
@@ -352,67 +558,59 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _setup_shortcuts(self):
+        for shortcut in self._shortcuts:
+            shortcut.setParent(None)
+            shortcut.deleteLater()
         self._shortcuts = []
-        for sequence, callback in (
-            (QKeySequence(Qt.Key_Right), self._next_frame),
-            (QKeySequence(Qt.Key_Left), self._prev_frame),
-            (QKeySequence(Qt.Key_F), self._fit_view_requested),
-            (QKeySequence(Qt.CTRL + Qt.Key_Return), self._toggle_completed),
-            (QKeySequence(Qt.META + Qt.Key_Return), self._toggle_completed),
-        ):
-            shortcut = QShortcut(sequence, self)
-            shortcut.setContext(Qt.ApplicationShortcut)
-            shortcut.activated.connect(callback)
-            self._shortcuts.append(shortcut)
-        for standard_key, callback in (
-            (QKeySequence.Save, self._save_current),
-            (QKeySequence.Copy, self._copy_selected_box),
-            (QKeySequence.Paste, self._paste_copied_box),
-            (QKeySequence.Undo, self._undo_current_frame),
-        ):
-            shortcut = QShortcut(standard_key, self)
-            shortcut.setContext(Qt.ApplicationShortcut)
-            shortcut.activated.connect(callback)
-            self._shortcuts.append(shortcut)
-        for sequence in ("Ctrl++", "Ctrl+="):
-            shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.setContext(Qt.ApplicationShortcut)
-            shortcut.activated.connect(self._zoom_ui_in)
-            self._shortcuts.append(shortcut)
-        for sequence in ("Meta++", "Meta+=", "Ctrl+Shift+=", "Meta+Shift+="):
-            shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.setContext(Qt.ApplicationShortcut)
-            shortcut.activated.connect(self._zoom_ui_in)
-            self._shortcuts.append(shortcut)
-        shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
-        shortcut.setContext(Qt.ApplicationShortcut)
-        shortcut.activated.connect(self._zoom_ui_out)
-        self._shortcuts.append(shortcut)
-        shortcut = QShortcut(QKeySequence("Meta+-"), self)
-        shortcut.setContext(Qt.ApplicationShortcut)
-        shortcut.activated.connect(self._zoom_ui_out)
-        self._shortcuts.append(shortcut)
-        shortcut = QShortcut(QKeySequence("Ctrl+0"), self)
-        shortcut.setContext(Qt.ApplicationShortcut)
-        shortcut.activated.connect(self._reset_ui_zoom)
-        self._shortcuts.append(shortcut)
-        shortcut = QShortcut(QKeySequence("Meta+0"), self)
-        shortcut.setContext(Qt.ApplicationShortcut)
-        shortcut.activated.connect(self._reset_ui_zoom)
-        self._shortcuts.append(shortcut)
-        for sequence, callback in (
-            ("Ctrl+G", self._goto_frame_dialog),
-            ("Meta+G", self._goto_frame_dialog),
-        ):
-            shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.setContext(Qt.ApplicationShortcut)
-            shortcut.activated.connect(callback)
-            self._shortcuts.append(shortcut)
-        for key in (Qt.Key_Delete, Qt.Key_Backspace):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.setContext(Qt.ApplicationShortcut)
-            shortcut.activated.connect(self._delete_selected_box)
-            self._shortcuts.append(shortcut)
+        # Key execution is centralized in eventFilter so focused child widgets
+        # cannot swallow app-level annotation shortcuts.
+
+    def _load_hotkeys(self) -> Dict[str, str]:
+        hotkeys = dict(HOTKEY_DEFAULTS)
+        self._settings.beginGroup("hotkeys")
+        try:
+            for key in hotkeys:
+                value = self._settings.value(key, hotkeys[key])
+                if value:
+                    hotkeys[key] = str(value)
+        finally:
+            self._settings.endGroup()
+        return hotkeys
+
+    def _save_hotkeys(self):
+        self._settings.beginGroup("hotkeys")
+        try:
+            for key, value in self._hotkeys.items():
+                self._settings.setValue(key, value)
+        finally:
+            self._settings.endGroup()
+            self._settings.sync()
+
+    def _shortcut_callbacks(self):
+        return {
+            "prev_frame": self._prev_frame,
+            "next_frame": self._next_frame,
+            "save": self._save_current,
+            "complete": self._toggle_completed,
+            "fit_view": self._fit_view_requested,
+            "draw_box": self._toggle_draw_box_shortcut,
+            "delete_box": self._delete_selected_box,
+            "copy": self._copy_selected_box,
+            "paste": self._paste_copied_box,
+            "undo": self._undo_current_frame,
+            "goto_frame": self._goto_frame_dialog,
+            "ui_zoom_in": self._zoom_ui_in,
+            "ui_zoom_out": self._zoom_ui_out,
+            "ui_zoom_reset": self._reset_ui_zoom,
+        }
+
+    def _open_hotkey_dialog(self):
+        dialog = HotkeyDialog(self._hotkeys, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self._hotkeys = dialog.hotkeys()
+            self._save_hotkeys()
+            self._setup_shortcuts()
+            self._status.showMessage("Hotkeys updated.", 3000)
 
     def _apply_ui_zoom(self):
         font = QApplication.font()
@@ -440,6 +638,13 @@ class MainWindow(QMainWindow):
             self._status.showMessage("Release overlay key before changing zoom.")
             return
         self._canvas.fit_view()
+
+    def _fit_current_frame_after_layout(self):
+        if not self._frame_paths:
+            return
+        self._canvas.fit_view()
+        if hasattr(self._timeline, "center_current"):
+            self._timeline.center_current()
 
     # ------------------------------------------------------------------ dataset
 
@@ -494,9 +699,11 @@ class MainWindow(QMainWindow):
             if done:
                 self._timeline.set_completed(i, True)
 
+        self._fit_main_window_to_screen()
         self._goto_frame(first_unlabelled)
         self._update_save_state()
-        self._fit_main_window_to_screen()
+        QTimer.singleShot(0, self._fit_current_frame_after_layout)
+        QTimer.singleShot(120, self._fit_current_frame_after_layout)
         self._status.showMessage(
             f"Loaded {len(self._frame_paths)} frames from '{clip_path.name}'. "
             f"Starting at frame {first_unlabelled + 1}."
@@ -543,7 +750,157 @@ class MainWindow(QMainWindow):
         return ", ".join(ranges)
 
     def _format_id_list(self, ids: List[int]) -> str:
-        return ", ".join(str(identity) for identity in ids) if ids else "None"
+        values = sorted(set(ids))
+        if not values:
+            return "None"
+        return ", ".join(str(identity) for identity in values)
+
+    def _frame_sanity(self, index: int) -> Dict[str, object]:
+        curr_boxes = self._get_boxes(index)
+        curr_id_list = self._ids_in_frame(curr_boxes)
+        curr_ids = set(curr_id_list)
+        unassigned = sum(1 for box in curr_boxes if box.identity < 0)
+        total = len(curr_boxes)
+        sanity = []
+        if unassigned:
+            sanity.append("label all boxes")
+        curr_duplicates = self._duplicate_ids(curr_id_list)
+        if curr_duplicates:
+            sanity.append(f"resolve duplicate current IDs: {self._format_id_list(curr_duplicates)}")
+
+        prev_ids = set()
+        prev_duplicates = []
+        stayed = []
+        added = sorted(curr_ids)
+        disappeared = []
+        if index > 0:
+            prev_boxes = self._get_boxes(index - 1)
+            prev_id_list = self._ids_in_frame(prev_boxes)
+            prev_ids = set(prev_id_list)
+            prev_duplicates = self._duplicate_ids(prev_id_list)
+            if prev_duplicates:
+                sanity.append(f"previous frame has duplicate IDs: {self._format_id_list(prev_duplicates)}")
+            stayed = sorted(prev_ids & curr_ids)
+            added = sorted(curr_ids - prev_ids)
+            disappeared = sorted(prev_ids - curr_ids)
+            if len(prev_ids) != len(stayed) + len(disappeared):
+                sanity.append("previous IDs must equal stayed + disappeared")
+            if len(curr_ids) != len(stayed) + len(added):
+                sanity.append("current IDs must equal stayed + added")
+
+        if len(curr_ids) != total - unassigned:
+            sanity.append("current boxes must equal assigned IDs + unassigned")
+
+        return {
+            "passed": not sanity,
+            "messages": sanity,
+            "total": total,
+            "unassigned": unassigned,
+            "curr_ids": curr_ids,
+            "prev_ids": prev_ids,
+            "stayed": stayed,
+            "added": added,
+            "disappeared": disappeared,
+        }
+
+    def _ids_in_frame(self, boxes: List[Box]) -> List[int]:
+        return [box.identity for box in boxes if box.identity >= 0]
+
+    def _duplicate_ids(self, ids: List[int]) -> List[int]:
+        seen = set()
+        duplicates = set()
+        for identity in ids:
+            if identity in seen:
+                duplicates.add(identity)
+            seen.add(identity)
+        return sorted(duplicates)
+
+    def _next_unused_identity(self) -> int:
+        used = set()
+        for boxes in self._boxes_per_frame.values():
+            used.update(self._ids_in_frame(boxes))
+        if self._frame_paths:
+            for idx in (self._current_index, self._current_index - 1, self._current_index + 1):
+                if 0 <= idx < len(self._frame_paths):
+                    used.update(self._ids_in_frame(self._get_boxes(idx)))
+        return max(used) + 1 if used else 0
+
+    def _update_next_id_button(self):
+        if not hasattr(self, "_btn_assign_next_id"):
+            return
+        next_id = self._next_unused_identity() if self._frame_paths else 0
+        self._btn_assign_next_id.setText(f"New ID: {next_id}")
+        enabled = self._selected_box is not None
+        self._btn_assign_next_id.setEnabled(enabled)
+
+    def _update_unassigned_direct(self, unassigned: int, total: int):
+        if not hasattr(self, "_btn_direct_unassigned"):
+            return
+        if not self._frame_paths:
+            self._lbl_unassigned_value.setText("- / -")
+            self._btn_direct_unassigned.setEnabled(False)
+            return
+        self._lbl_unassigned_value.setText(f"{unassigned} / {total}")
+        self._lbl_unassigned_value.setStyleSheet(
+            f"color: {'#9a3412' if unassigned else '#166534'}; font-weight: 700;"
+        )
+        self._btn_direct_unassigned.setEnabled(unassigned > 0)
+
+    def _update_disappeared_direct(self, disappeared_ids: List[int]):
+        if not hasattr(self, "_btn_direct_disappeared"):
+            return
+        count = len(disappeared_ids)
+        self._lbl_disappeared_value.setText(str(count))
+        self._lbl_disappeared_value.setStyleSheet(
+            f"color: {'#b91c1c' if count else '#64748b'}; font-weight: 700;"
+        )
+        self._btn_direct_disappeared.setEnabled(count > 0)
+
+    def _unassigned_boxes_current(self) -> List[Box]:
+        if not self._frame_paths:
+            return []
+        return [box for box in self._get_boxes(self._current_index) if box.identity < 0]
+
+    def _disappeared_boxes_from_previous(self) -> List[Box]:
+        if not self._frame_paths or self._current_index <= 0:
+            return []
+        curr_ids = {box.identity for box in self._get_boxes(self._current_index) if box.identity >= 0}
+        boxes = [
+            box for box in self._get_boxes(self._current_index - 1)
+            if box.identity >= 0 and box.identity not in curr_ids
+        ]
+        return sorted(boxes, key=lambda box: box.identity)
+
+    def _direct_unassigned_box(self):
+        boxes = self._unassigned_boxes_current()
+        if not boxes:
+            self._status.showMessage("No unassigned boxes in this frame.", 3000)
+            return
+        if self._current_boxes_hidden_for_overlay:
+            self._canvas.set_current_boxes_visible(True)
+            self._current_boxes_hidden_for_overlay = False
+        self._active_overlay_key = None
+        self._canvas.clear_reference_boxes()
+        self._canvas.clear_warning_notices()
+        target = boxes[self._direct_unassigned_cursor % len(boxes)]
+        self._direct_unassigned_cursor = (self._direct_unassigned_cursor + 1) % len(boxes)
+        if self._canvas.focus_box(target, flashes=3):
+            self._status.showMessage("Focused next unassigned box.", 3000)
+
+    def _direct_disappeared_box(self):
+        boxes = self._disappeared_boxes_from_previous()
+        if not boxes:
+            self._status.showMessage("No disappeared IDs from the previous frame.", 3000)
+            return
+        if self._current_boxes_hidden_for_overlay:
+            self._canvas.set_current_boxes_visible(True)
+            self._current_boxes_hidden_for_overlay = False
+        self._active_overlay_key = None
+        self._canvas.clear_warning_notices()
+        target = boxes[self._direct_disappeared_cursor % len(boxes)]
+        self._direct_disappeared_cursor = (self._direct_disappeared_cursor + 1) % len(boxes)
+        if self._canvas.focus_reference_box(target, label="prev", flashes=3):
+            self._status.showMessage(f"Focused last location of disappeared ID {target.identity}.", 3000)
 
     def _id_summary_html(self, rows: List[tuple]) -> str:
         rendered_rows = []
@@ -597,35 +954,51 @@ class MainWindow(QMainWindow):
             self._lbl_id_summary.setText(
                 self._id_summary_html([("Status", "No dataset loaded.", "#64748b")])
             )
+            self._update_unassigned_direct(0, 0)
+            self._update_disappeared_direct([])
+            self._update_next_id_button()
             return
-        curr_boxes = self._get_boxes(self._current_index)
-        curr_ids = {box.identity for box in curr_boxes if box.identity >= 0}
-        unassigned = sum(1 for box in curr_boxes if box.identity < 0)
-        total = len(curr_boxes)
+        result = self._frame_sanity(self._current_index)
+        curr_ids = result["curr_ids"]
+        unassigned = result["unassigned"]
+        total = result["total"]
+        self._update_unassigned_direct(unassigned, total)
+        sanity = result["messages"]
         if self._current_index <= 0:
+            sanity_text = (
+                "<b style='color:#166534;'>All good!</b>"
+                if result["passed"] else
+                f"<i style='color:#b91c1c;'>{'; '.join(sanity)}</i>"
+            )
             self._lbl_id_summary.setText(
                 self._id_summary_html([
                     ("Against", "No previous frame", "#64748b"),
-                    ("Stayed", "None", "#64748b"),
-                    ("Added", self._format_id_list(sorted(curr_ids)), "#166534"),
-                    ("Disappeared", "None", "#64748b"),
-                    ("Unassigned boxes", f"{unassigned} / {total}", "#9a3412" if unassigned else "#166534"),
+                    ("Sanity", sanity_text, "#111827"),
+                    (f"Added ({len(curr_ids)})", self._format_id_list(sorted(curr_ids)), "#166534"),
+                    ("Stayed (0)", "None", "#64748b"),
                 ])
             )
+            self._update_disappeared_direct([])
+            self._update_next_id_button()
             return
-        prev_ids = {box.identity for box in self._get_boxes(self._current_index - 1) if box.identity >= 0}
-        stayed = sorted(prev_ids & curr_ids)
-        added = sorted(curr_ids - prev_ids)
-        disappeared = sorted(prev_ids - curr_ids)
+        stayed = result["stayed"]
+        added = result["added"]
+        disappeared = result["disappeared"]
+        self._update_disappeared_direct(disappeared)
+        sanity_text = (
+            "<b style='color:#166534;'>All good!</b>"
+            if result["passed"] else
+            f"<i style='color:#b91c1c;'>{'; '.join(sanity)}</i>"
+        )
         self._lbl_id_summary.setText(
             self._id_summary_html([
                 ("Against", f"Frame {self._current_index}", "#475569"),
-                ("Stayed", f"{len(stayed)} - {self._format_id_list(stayed)}", "#1d4ed8"),
-                ("Added", f"{len(added)} - {self._format_id_list(added)}", "#166534"),
-                ("Disappeared", f"{len(disappeared)} - {self._format_id_list(disappeared)}", "#b91c1c"),
-                ("Unassigned boxes", f"{unassigned} / {total}", "#9a3412" if unassigned else "#166534"),
+                ("Sanity", sanity_text, "#111827"),
+                (f"Added ({len(added)})", self._format_id_list(added), "#166534"),
+                (f"Stayed ({len(stayed)})", self._format_id_list(stayed), "#1d4ed8"),
             ])
         )
+        self._update_next_id_button()
 
     def _handle_dirty_before_context_change(self, action: str) -> bool:
         if not self._dirty_frames:
@@ -730,6 +1103,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_btn_draw_box") and self._btn_draw_box.isChecked():
             self._btn_draw_box.setChecked(False)
         index = max(0, min(index, len(self._frame_paths) - 1))
+        if index != self._current_index:
+            self._direct_unassigned_cursor = 0
+            self._direct_disappeared_cursor = 0
         self._current_index = index
 
         pix = QPixmap(str(self._frame_paths[index]))
@@ -823,6 +1199,7 @@ class MainWindow(QMainWindow):
         self._canvas.clear_warning_notices()
         self._id_input.setEnabled(True)
         self._btn_assign.setEnabled(True)
+        self._update_next_id_button()
         self._btn_remove_id.setEnabled(True)
         self._btn_delete_box.setEnabled(True)
         if box.identity >= 0:
@@ -843,6 +1220,7 @@ class MainWindow(QMainWindow):
         self._canvas.clear_warning_notices()
         self._id_input.setEnabled(False)
         self._btn_assign.setEnabled(False)
+        self._update_next_id_button()
         self._btn_remove_id.setEnabled(False)
         self._btn_delete_box.setEnabled(False)
         self._id_input.clear()
@@ -908,6 +1286,13 @@ class MainWindow(QMainWindow):
         self._show_identity_trajectory_if_complete(identity)
         self._update_id_summary()
         self._status.showMessage(f"Assigned identity {identity}.", 3000)
+
+    def _assign_next_identity(self):
+        if self._selected_box is None:
+            return
+        identity = self._next_unused_identity()
+        self._id_input.setText(str(identity))
+        self._assign_identity()
 
     def _on_id_input_changed(self, text: str):
         if self._pending_id_confirm is None:
@@ -993,6 +1378,9 @@ class MainWindow(QMainWindow):
     def _toggle_draw_box(self, enabled: bool):
         self._canvas.set_draw_mode(enabled)
         self._status.showMessage("Draw box mode enabled." if enabled else "Draw box mode disabled.", 3000)
+
+    def _toggle_draw_box_shortcut(self):
+        self._btn_draw_box.setChecked(not self._btn_draw_box.isChecked())
 
     def _on_box_drawn(self, box: Box):
         boxes = self._get_boxes(self._current_index)
@@ -1127,19 +1515,26 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ save / complete
 
+    def _set_completed_state(self, idx: int, completed: bool):
+        self._completed[idx] = completed
+        self._timeline.set_completed(idx, completed)
+        if idx == self._current_index:
+            self._btn_complete.setChecked(completed)
+            self._btn_complete.setText("Completed" if completed else "Mark Completed")
+
     def _toggle_completed(self):
         idx = self._current_index
         done = self._btn_complete.isChecked()
-        self._completed[idx] = done
-        self._timeline.set_completed(idx, done)
-        self._btn_complete.setText("Completed" if done else "Mark Completed")
         if done:
             if not self._save_current():
-                self._completed[idx] = False
-                self._timeline.set_completed(idx, False)
-                self._btn_complete.setChecked(False)
-                self._btn_complete.setText("Mark Completed")
+                self._set_completed_state(idx, False)
                 return
+            if not self._completed.get(idx, False):
+                self._set_completed_state(idx, False)
+                self._status.showMessage("Frame saved, but sanity check failed. Not marked completed.", 5000)
+                return
+        else:
+            self._set_completed_state(idx, False)
         self._reload_boxes_for_frame(idx)
 
     def _save_current(self):
@@ -1158,13 +1553,21 @@ class MainWindow(QMainWindow):
                 f"Could not write labels to:\n{gt_path}\n\nCheck disk space and permissions.",
             )
             return False
+        sanity = self._frame_sanity(idx)
+        self._set_completed_state(idx, bool(sanity["passed"]))
         self._dirty_frames.discard(idx)
         if idx == self._current_index:
             self._canvas.clear_reference_boxes()
             self._lbl_frame.setText(f"Frame: {idx + 1} / {len(self._frame_paths)}")
             self._update_id_summary()
         self._update_save_state()
-        self._status.showMessage(f"Saved frame {idx + 1}: {gt_path.name}", 3000)
+        if sanity["passed"]:
+            self._status.showMessage(f"Saved and completed frame {idx + 1}: {gt_path.name}", 3000)
+        else:
+            self._status.showMessage(
+                f"Saved frame {idx + 1}, but not completed: {'; '.join(sanity['messages'])}",
+                6000,
+            )
         return True
 
     def _gt_path_for_index(self, idx: int) -> Path:
@@ -1195,6 +1598,16 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.KeyPress and not event.isAutoRepeat():
             if self._handle_global_shortcut(event):
                 return True
+        if event.type() == QEvent.KeyRelease and not event.isAutoRepeat():
+            if self._event_matches_hotkey(event, "overlay_prev"):
+                self._clear_adjacent_overlay(Qt.Key_Q)
+                return True
+            if self._event_matches_hotkey(event, "overlay_next"):
+                self._clear_adjacent_overlay(Qt.Key_W)
+                return True
+            if self._event_matches_hotkey(event, "overlay_det"):
+                self._clear_adjacent_overlay(Qt.Key_D)
+                return True
         return super().eventFilter(obj, event)
 
     def _handle_global_shortcut(self, event) -> bool:
@@ -1203,30 +1616,50 @@ class MainWindow(QMainWindow):
         focus = QApplication.focusWidget()
         if focus is not None and focus is not self and not self.isAncestorOf(focus):
             return False
-        mods = event.modifiers()
-        key = event.key()
-        primary_only = bool(mods & (Qt.ControlModifier | Qt.MetaModifier)) and not (mods & Qt.AltModifier)
-        if primary_only and key == Qt.Key_S:
-            self._save_current()
+        id_focused = isinstance(focus, QLineEdit)
+        for action, key_value in (
+            ("overlay_prev", Qt.Key_Q),
+            ("overlay_next", Qt.Key_W),
+            ("overlay_det", Qt.Key_D),
+        ):
+            if not id_focused and self._event_matches_hotkey(event, action):
+                self._canvas.stop_flash()
+                self._show_adjacent_overlay(key_value)
+                return True
+
+        callbacks = self._shortcut_callbacks()
+        for action, callback in callbacks.items():
+            if self._event_matches_hotkey(event, action):
+                if id_focused and not self._event_has_primary_modifier(event) and action not in ("delete_box",):
+                    return False
+                self._canvas.stop_flash()
+                callback()
+                return True
+        return False
+
+    def _event_has_primary_modifier(self, event) -> bool:
+        return bool(event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier))
+
+    def _event_matches_hotkey(self, event, action: str) -> bool:
+        configured = self._hotkeys.get(action, "")
+        if not configured:
+            return False
+        sequence = QKeySequence(configured)
+        if sequence.isEmpty():
+            return False
+        modifiers = int(event.modifiers() & (
+            Qt.ShiftModifier | Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier
+        ))
+        event_sequence = QKeySequence(modifiers | int(event.key()))
+        if event_sequence.matches(sequence) == QKeySequence.ExactMatch:
             return True
-        if primary_only and key == Qt.Key_C:
-            self._copy_selected_box()
-            return True
-        if primary_only and key == Qt.Key_V:
-            self._paste_copied_box()
-            return True
-        if primary_only and key == Qt.Key_Z:
-            self._undo_current_frame()
-            return True
-        if primary_only and key == Qt.Key_G:
-            self._goto_frame_dialog()
-            return True
-        if primary_only and key == Qt.Key_Return:
-            self._toggle_completed()
-            return True
-        if mods == Qt.NoModifier and key in (Qt.Key_Delete, Qt.Key_Backspace):
-            self._delete_selected_box()
-            return True
+        if action == "delete_box" and configured in ("Del", "Delete"):
+            if modifiers == 0 and event.key() == Qt.Key_Backspace:
+                return True
+        if configured.startswith("Ctrl+"):
+            meta_sequence = QKeySequence("Meta+" + configured[5:])
+            if event_sequence.matches(meta_sequence) == QKeySequence.ExactMatch:
+                return True
         return False
 
     # ------------------------------------------------------------------ key events
@@ -1235,19 +1668,23 @@ class MainWindow(QMainWindow):
         if event.isAutoRepeat():
             super().keyPressEvent(event)
             return
-        key = event.key()
+        self._canvas.stop_flash()
         id_focused = hasattr(self, "_id_input") and self._id_input.hasFocus()
-        if key in (Qt.Key_Q, Qt.Key_W, Qt.Key_D) and not id_focused:
-            self._show_adjacent_overlay(key)
-        elif key == Qt.Key_Right and not id_focused:
+        if self._event_matches_hotkey(event, "overlay_prev") and not id_focused:
+            self._show_adjacent_overlay(Qt.Key_Q)
+        elif self._event_matches_hotkey(event, "overlay_next") and not id_focused:
+            self._show_adjacent_overlay(Qt.Key_W)
+        elif self._event_matches_hotkey(event, "overlay_det") and not id_focused:
+            self._show_adjacent_overlay(Qt.Key_D)
+        elif self._event_matches_hotkey(event, "next_frame") and not id_focused:
             self._next_frame()
-        elif key == Qt.Key_Left and not id_focused:
+        elif self._event_matches_hotkey(event, "prev_frame") and not id_focused:
             self._prev_frame()
-        elif key in (Qt.Key_Delete, Qt.Key_Backspace) and not id_focused:
+        elif self._event_matches_hotkey(event, "delete_box") and not id_focused:
             self._delete_selected_box()
-        elif key == Qt.Key_B and not id_focused:
-            self._btn_draw_box.setChecked(not self._btn_draw_box.isChecked())
-        elif key == Qt.Key_Escape:
+        elif self._event_matches_hotkey(event, "draw_box") and not id_focused:
+            self._toggle_draw_box_shortcut()
+        elif event.key() == Qt.Key_Escape:
             if self._btn_draw_box.isChecked():
                 self._btn_draw_box.setChecked(False)
             elif not id_focused:
@@ -1259,7 +1696,11 @@ class MainWindow(QMainWindow):
         if event.isAutoRepeat():
             super().keyReleaseEvent(event)
             return
-        if event.key() in (Qt.Key_Q, Qt.Key_W, Qt.Key_D):
-            self._clear_adjacent_overlay(event.key())
+        if self._event_matches_hotkey(event, "overlay_prev"):
+            self._clear_adjacent_overlay(Qt.Key_Q)
+        elif self._event_matches_hotkey(event, "overlay_next"):
+            self._clear_adjacent_overlay(Qt.Key_W)
+        elif self._event_matches_hotkey(event, "overlay_det"):
+            self._clear_adjacent_overlay(Qt.Key_D)
         else:
             super().keyReleaseEvent(event)

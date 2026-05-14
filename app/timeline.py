@@ -220,15 +220,25 @@ class TimelineWidget(QWidget):
         if 0 <= index < len(self._thumbs):
             self._thumbs[index].set_current(True)
             self._center_on_index(index)
+            QTimer.singleShot(0, lambda i=index: self._center_on_index(i))
+            QTimer.singleShot(120, lambda i=index: self._center_on_index(i))
             for idx in range(max(0, index - THUMB_PREFETCH), min(len(self._thumbs), index + THUMB_PREFETCH + 1)):
                 self._request_thumb(idx)
             QTimer.singleShot(0, self._request_visible_thumbs)
+
+    def center_current(self):
+        self._center_on_index(self._current)
+        QTimer.singleShot(0, lambda: self._center_on_index(self._current))
 
     def _center_on_index(self, index: int):
         bar = self._scroll.horizontalScrollBar()
         target = index * THUMB_STRIDE + THUMB_STRIDE // 2 - self._scroll.viewport().width() // 2
         target = max(bar.minimum(), min(bar.maximum(), target))
         bar.setValue(target)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.center_current)
 
     def set_completed(self, index: int, completed: bool):
         if 0 <= index < len(self._thumbs):

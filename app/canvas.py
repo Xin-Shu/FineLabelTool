@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QRectF, QPointF, pyqtSignal
+from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer, pyqtSignal
 from PyQt5.QtGui import (QPainter, QPen, QBrush, QColor, QPixmap,
                           QFont, QCursor, QPainterPath, QFontDatabase)
 from PyQt5.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsItem,
@@ -328,6 +328,12 @@ class ImageCanvas(QGraphicsView):
         self._draw_mode = False
         self._draw_start: Optional[QPointF] = None
         self._draw_item: Optional[QGraphicsRectItem] = None
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setInterval(140)
+        self._flash_timer.timeout.connect(self._advance_flash)
+        self._flash_item: Optional[BoxItem] = None
+        self._flash_remaining = 0
+        self._flash_restore_highlight = False
 
         self.horizontalScrollBar().valueChanged.connect(self._update_minimap)
         self.verticalScrollBar().valueChanged.connect(self._update_minimap)
@@ -346,10 +352,12 @@ class ImageCanvas(QGraphicsView):
     # ------------------------------------------------------------------ public
 
     def clear_selection(self):
+        self.stop_flash()
         self._scene.clearSelection()
         self.box_deselected.emit()
 
     def highlight_box(self, box: Box):
+        self.stop_flash()
         self.clear_highlight()
         for item in self._box_items:
             if item.box is box:
@@ -363,10 +371,17 @@ class ImageCanvas(QGraphicsView):
                 item.highlighted = False
                 item.update()
 
+    def _item_for_box(self, box: Box) -> Optional[BoxItem]:
+        for item in self._box_items:
+            if item.box is box:
+                return item
+        return None
+
     def load_frame(self, pixmap: QPixmap, boxes: List[Box], keep_zoom: bool = False):
         old_transform = self.transform() if keep_zoom else None
         old_center = self.mapToScene(self.viewport().rect().center()) if keep_zoom else None
 
+        self.stop_flash()
         self._scene.clear()
         self._box_items.clear()
         self._reference_items.clear()
@@ -417,6 +432,89 @@ class ImageCanvas(QGraphicsView):
         for item in self._box_items:
             item.prepareGeometryChange()
             item.update()
+
+    def focus_box(self, box: Box, flashes: int = 3):
+        item = self._item_for_box(box)
+        if item is None:
+            return False
+        return self._focus_item(item, box, flashes=flashes, select=True)
+
+    def focus_reference_box(self, box: Box, label: str = "prev", flashes: int = 3):
+        self.clear_reference_boxes()
+        self._overlay_active = True
+        self._panning = False
+        item = BoxItem(
+            box,
+            self._img_w,
+            self._img_h,
+            reference_label=label,
+        )
+        item.highlighted = True
+        self._scene.addItem(item)
+        self._reference_items.append(item)
+        self.set_overlay_notice(f"Last seen: ID {box.identity}", notice_id="direct")
+        return self._focus_item(item, box, flashes=flashes, select=False)
+
+    def _focus_item(self, item: BoxItem, box: Box, flashes: int = 3, select: bool = True):
+        self.stop_flash()
+        if select:
+            self._scene.clearSelection()
+            item.setSelected(True)
+            self.box_selected.emit(box)
+
+        rect = item._pixel_rect()
+        target = self._focus_rect(rect)
+        if not target.isEmpty():
+            self.fitInView(target, Qt.KeepAspectRatio)
+            self.centerOn(rect.center())
+            self._update_minimap()
+
+        self._flash_item = item
+        self._flash_restore_highlight = item.highlighted
+        self._flash_remaining = max(1, flashes) * 2
+        item.highlighted = False
+        item.update()
+        self._advance_flash()
+        self._flash_timer.start()
+        return True
+
+    def _focus_rect(self, rect: QRectF) -> QRectF:
+        scene_rect = self._scene.sceneRect()
+        if scene_rect.isEmpty():
+            return rect
+        margin_x = max(rect.width() * 2.0, scene_rect.width() * 0.04, 20.0)
+        margin_y = max(rect.height() * 2.0, scene_rect.height() * 0.04, 20.0)
+        target = rect.adjusted(-margin_x, -margin_y, margin_x, margin_y)
+        min_w = scene_rect.width() * 0.08
+        min_h = scene_rect.height() * 0.08
+        if target.width() < min_w:
+            extra = (min_w - target.width()) / 2
+            target.adjust(-extra, 0, extra, 0)
+        if target.height() < min_h:
+            extra = (min_h - target.height()) / 2
+            target.adjust(0, -extra, 0, extra)
+        return target.intersected(scene_rect)
+
+    def stop_flash(self):
+        if self._flash_timer.isActive():
+            self._flash_timer.stop()
+        if self._flash_item is not None:
+            self._flash_item.highlighted = self._flash_restore_highlight
+            self._flash_item.update()
+        self._flash_item = None
+        self._flash_remaining = 0
+        self._flash_restore_highlight = False
+
+    def _advance_flash(self):
+        if self._flash_item is None:
+            self._flash_timer.stop()
+            return
+        if self._flash_remaining <= 0:
+            self.stop_flash()
+            return
+        self._flash_item.highlighted = not self._flash_item.highlighted
+        self._flash_item.update()
+        self._flash_remaining -= 1
 
     def set_boxes_locked(self, locked: bool):
         self.set_geometry_locks(locked, locked)
@@ -565,6 +663,7 @@ class ImageCanvas(QGraphicsView):
     # ------------------------------------------------------------------ events
 
     def wheelEvent(self, event):
+        self.stop_flash()
         if self._overlay_active:
             event.ignore()
             return
@@ -667,6 +766,7 @@ class ImageCanvas(QGraphicsView):
         self._minimap.raise_()
 
     def mousePressEvent(self, event):
+        self.stop_flash()
         if self._draw_mode and event.button() == Qt.LeftButton and self._frame_pixmap is not None:
             self._draw_start = self.mapToScene(event.pos())
             self._draw_item = QGraphicsRectItem(QRectF(self._draw_start, self._draw_start))

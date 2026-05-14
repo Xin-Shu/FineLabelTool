@@ -96,12 +96,18 @@ class FrameThumb(QLabel):
 
         if self._is_completed:
             p.fillRect(2, 1, THUMB_W, THUMB_H, QColor(52, 199, 89, 95))
-            p.setPen(QPen(QColor(14, 122, 44), 2))
-            p.setFont(QFont("Arial", 16, QFont.Bold))
-            p.drawText(W - 24, 21, "✓")
+            p.setRenderHint(QPainter.Antialiasing, True)
+            pen = QPen(QColor(14, 122, 44), 3)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.drawLine(W - 22, 15, W - 18, 20)
+            p.drawLine(W - 18, 20, W - 10, 10)
 
         p.setPen(QPen(QColor(180, 180, 180)))
-        p.setFont(QFont("Arial", 7))
+        font = QFont(self.font())
+        font.setPointSize(max(7, font.pointSize()))
+        p.setFont(font)
         p.drawText(2, THUMB_H + 14, str(self.index + 1))
         p.end()
         self.setPixmap(canvas)

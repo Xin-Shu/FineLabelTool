@@ -1,8 +1,9 @@
 from __future__ import annotations
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtGui import QFont, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QInputDialog,
@@ -82,14 +83,18 @@ class MainWindow(QMainWindow):
         self._pending_id_confirm: Optional[int] = None
         self._current_boxes_hidden_for_overlay = False
         self._first_load = True
+        self._shortcuts: List[QShortcut] = []
         font = QApplication.font()
         self._base_font_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
         self._ui_zoom = 1.0
 
         self._init_ui()
         self._setup_shortcuts()
+        self._update_save_state()
+        self._update_id_summary()
         self._apply_ui_zoom()
         self._fit_main_window_to_screen()
+        QApplication.instance().installEventFilter(self)
         self._select_dataset()
 
     # ------------------------------------------------------------------ UI
@@ -155,14 +160,20 @@ class MainWindow(QMainWindow):
         # Top bar
         top = QHBoxLayout()
         self._lbl_dataset = QLabel("No dataset loaded")
-        self._lbl_dataset.setFont(QFont("Arial", 11, QFont.Bold))
+        dataset_font = QFont(QApplication.font())
+        dataset_font.setBold(True)
+        dataset_font.setPointSizeF(max(dataset_font.pointSizeF(), self._base_font_size + 1.0))
+        self._lbl_dataset.setFont(dataset_font)
         self._lbl_frame = QLabel("Frame: —")
-        self._lbl_frame.setFont(QFont("Arial", 10))
+        self._lbl_save_state = QLabel("No edits")
+        self._lbl_save_state.setAlignment(Qt.AlignCenter)
+        self._lbl_save_state.setMinimumWidth(140)
         btn_dataset = QPushButton("Dataset...")
         btn_dataset.clicked.connect(self._select_dataset)
         top.addWidget(self._lbl_dataset)
         top.addWidget(btn_dataset)
         top.addStretch()
+        top.addWidget(self._lbl_save_state)
         top.addWidget(self._lbl_frame)
         layout.addLayout(top)
 
@@ -256,9 +267,9 @@ class MainWindow(QMainWindow):
         frm_grp = QGroupBox("Frame")
         fg = QVBoxLayout(frm_grp)
 
-        self._btn_complete = QPushButton("Mark Completed  ✓")
+        self._btn_complete = QPushButton("Mark Completed")
         self._btn_complete.setCheckable(True)
-        self._btn_complete.setToolTip("Mark this frame as fully annotated and save (Ctrl+Enter)")
+        self._btn_complete.setToolTip("Mark this frame as fully annotated and save (Ctrl+Enter / Cmd+Enter)")
         self._btn_complete.clicked.connect(self._toggle_completed)
         fg.addWidget(self._btn_complete)
 
@@ -280,10 +291,10 @@ class MainWindow(QMainWindow):
         ng = QVBoxLayout(nav_grp)
 
         row2 = QHBoxLayout()
-        btn_prev = QPushButton("◀ Prev")
+        btn_prev = QPushButton("Prev")
         btn_prev.setToolTip("Go to previous frame (← arrow key)")
         btn_prev.clicked.connect(self._prev_frame)
-        btn_next = QPushButton("Next ▶")
+        btn_next = QPushButton("Next")
         btn_next.setToolTip("Go to next frame (→ arrow key)")
         btn_next.clicked.connect(self._next_frame)
         row2.addWidget(btn_prev)
@@ -322,34 +333,79 @@ class MainWindow(QMainWindow):
         tg.addWidget(self._btn_suggest_ids)
         layout.addWidget(tracker_grp)
 
+        summary_grp = QGroupBox("ID Summary (against prev)")
+        sg = QVBoxLayout(summary_grp)
+        self._lbl_id_summary = QLabel("No dataset loaded.")
+        self._lbl_id_summary.setWordWrap(True)
+        self._lbl_id_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sg.addWidget(self._lbl_id_summary)
+        layout.addWidget(summary_grp)
+
         layout.addStretch()
         return scroll
 
     def _setup_shortcuts(self):
-        QShortcut(QKeySequence(Qt.Key_Right),       self, self._next_frame)
-        QShortcut(QKeySequence(Qt.Key_Left),        self, self._prev_frame)
-        QShortcut(QKeySequence("Ctrl+S"),           self, self._save_current)
-        QShortcut(QKeySequence("Ctrl+Return"),      self, self._toggle_completed)
-        QShortcut(QKeySequence(Qt.Key_F),           self, self._fit_view_requested)
+        self._shortcuts = []
+        for sequence, callback in (
+            (QKeySequence(Qt.Key_Right), self._next_frame),
+            (QKeySequence(Qt.Key_Left), self._prev_frame),
+            (QKeySequence(Qt.Key_F), self._fit_view_requested),
+            (QKeySequence(Qt.CTRL + Qt.Key_Return), self._toggle_completed),
+            (QKeySequence(Qt.META + Qt.Key_Return), self._toggle_completed),
+        ):
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
+        for standard_key, callback in (
+            (QKeySequence.Save, self._save_current),
+            (QKeySequence.Copy, self._copy_selected_box),
+            (QKeySequence.Paste, self._paste_copied_box),
+            (QKeySequence.Undo, self._undo_current_frame),
+        ):
+            shortcut = QShortcut(standard_key, self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
         for sequence in ("Ctrl++", "Ctrl+="):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(self._zoom_ui_in)
+            self._shortcuts.append(shortcut)
+        for sequence in ("Meta++", "Meta+=", "Ctrl+Shift+=", "Meta+Shift+="):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(self._zoom_ui_in)
+            self._shortcuts.append(shortcut)
         shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
         shortcut.setContext(Qt.ApplicationShortcut)
         shortcut.activated.connect(self._zoom_ui_out)
+        self._shortcuts.append(shortcut)
+        shortcut = QShortcut(QKeySequence("Meta+-"), self)
+        shortcut.setContext(Qt.ApplicationShortcut)
+        shortcut.activated.connect(self._zoom_ui_out)
+        self._shortcuts.append(shortcut)
         shortcut = QShortcut(QKeySequence("Ctrl+0"), self)
         shortcut.setContext(Qt.ApplicationShortcut)
         shortcut.activated.connect(self._reset_ui_zoom)
+        self._shortcuts.append(shortcut)
+        shortcut = QShortcut(QKeySequence("Meta+0"), self)
+        shortcut.setContext(Qt.ApplicationShortcut)
+        shortcut.activated.connect(self._reset_ui_zoom)
+        self._shortcuts.append(shortcut)
         for sequence, callback in (
-            ("Ctrl+Z", self._undo_current_frame),
-            ("Ctrl+C", self._copy_selected_box),
-            ("Ctrl+V", self._paste_copied_box),
             ("Ctrl+G", self._goto_frame_dialog),
+            ("Meta+G", self._goto_frame_dialog),
         ):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
+        for key in (Qt.Key_Delete, Qt.Key_Backspace):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(self._delete_selected_box)
+            self._shortcuts.append(shortcut)
 
     def _apply_ui_zoom(self):
         font = QApplication.font()
@@ -432,6 +488,7 @@ class MainWindow(QMainWindow):
                 self._timeline.set_completed(i, True)
 
         self._goto_frame(first_unlabelled)
+        self._update_save_state()
         self._fit_main_window_to_screen()
         self._status.showMessage(
             f"Loaded {len(self._frame_paths)} frames from '{clip_path.name}'. "
@@ -463,16 +520,91 @@ class MainWindow(QMainWindow):
             h,
         )
 
+    def _format_frame_ranges(self, indices: List[int]) -> str:
+        if not indices:
+            return "None"
+        frames = sorted({idx + 1 for idx in indices})
+        ranges = []
+        start = prev = frames[0]
+        for frame in frames[1:]:
+            if frame == prev + 1:
+                prev = frame
+                continue
+            ranges.append(f"{start}-{prev}" if start != prev else str(start))
+            start = prev = frame
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        return ", ".join(ranges)
+
+    def _format_id_list(self, ids: List[int]) -> str:
+        return ", ".join(str(identity) for identity in ids) if ids else "None"
+
+    def _set_save_state_label(self, text: str, *, background: str, border: str, foreground: str):
+        self._lbl_save_state.setText(text)
+        self._lbl_save_state.setStyleSheet(
+            "QLabel {"
+            f"background: {background}; color: {foreground}; border: 1px solid {border}; "
+            "border-radius: 10px; padding: 4px 10px; font-weight: 700;"
+            "}"
+        )
+
+    def _update_save_state(self):
+        if not self._frame_paths:
+            self._set_save_state_label("No edits", background="#e5e7eb", border="#cbd5e1", foreground="#334155")
+            return
+        if self._dirty_frames:
+            current_dirty = self._current_index in self._dirty_frames
+            frame_text = f"frame {self._current_index + 1}" if current_dirty else f"{len(self._dirty_frames)} frames"
+            self._set_save_state_label(
+                f"Unsaved: {frame_text}",
+                background="#fff7ed",
+                border="#f59e0b",
+                foreground="#9a3412",
+            )
+            return
+        self._set_save_state_label(
+            f"Saved {datetime.now().strftime('%H:%M:%S')}",
+            background="#dcfce7",
+            border="#16a34a",
+            foreground="#166534",
+        )
+
+    def _update_id_summary(self):
+        if not self._frame_paths:
+            self._lbl_id_summary.setText("No dataset loaded.")
+            return
+        if self._current_index <= 0:
+            curr_ids = sorted({box.identity for box in self._get_boxes(self._current_index) if box.identity >= 0})
+            self._lbl_id_summary.setText(
+                "Previous frame: none\n"
+                f"Current IDs: {self._format_id_list(curr_ids)}"
+            )
+            return
+        prev_ids = {box.identity for box in self._get_boxes(self._current_index - 1) if box.identity >= 0}
+        curr_ids = {box.identity for box in self._get_boxes(self._current_index) if box.identity >= 0}
+        stayed = sorted(prev_ids & curr_ids)
+        added = sorted(curr_ids - prev_ids)
+        disappeared = sorted(prev_ids - curr_ids)
+        self._lbl_id_summary.setText(
+            f"Prev frame: {self._current_index}\n"
+            f"Stayed ({len(stayed)}): {self._format_id_list(stayed)}\n"
+            f"Added ({len(added)}): {self._format_id_list(added)}\n"
+            f"Disappeared ({len(disappeared)}): {self._format_id_list(disappeared)}"
+        )
+
     def _handle_dirty_before_context_change(self, action: str) -> bool:
         if not self._dirty_frames:
             return True
-        answer = QMessageBox.question(
-            self,
-            "Unsaved Changes",
-            f"Save edits to {len(self._dirty_frames)} frame(s) before {action}?",
-            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-            QMessageBox.Save,
-        )
+        frame_list = sorted(self._dirty_frames)
+        summary = self._format_frame_ranges(frame_list)
+        box = QMessageBox(self)
+        box.setWindowTitle("Unsaved Changes")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"Save edits to {len(frame_list)} frame(s) before {action}?")
+        box.setInformativeText(f"Unsaved frames: {summary}")
+        box.setDetailedText("\n".join(f"Frame {idx + 1}: {self._frame_paths[idx].name}" for idx in frame_list))
+        box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Save)
+        answer = box.exec_()
         if answer == QMessageBox.Save:
             for idx in sorted(self._dirty_frames):
                 if not self._save_frame(idx):
@@ -573,6 +705,7 @@ class MainWindow(QMainWindow):
         keep_zoom = not self._first_load
         self._canvas.load_frame(pix, boxes, keep_zoom=keep_zoom)
         self._canvas.clear_reference_boxes()
+        self._canvas.clear_warning_notices()
         self._canvas.set_current_boxes_visible(True)
         self._active_overlay_key = None
         self._current_boxes_hidden_for_overlay = False
@@ -582,10 +715,12 @@ class MainWindow(QMainWindow):
         n = len(self._frame_paths)
         dirty = " *" if index in self._dirty_frames else ""
         self._lbl_frame.setText(f"Frame: {index + 1} / {n}{dirty}")
+        self._update_save_state()
+        self._update_id_summary()
 
         done = self._completed.get(index, False)
         self._btn_complete.setChecked(done)
-        self._btn_complete.setText("✓ Completed" if done else "Mark Completed  ✓")
+        self._btn_complete.setText("Completed" if done else "Mark Completed")
 
         self._on_box_deselected()
 
@@ -629,7 +764,7 @@ class MainWindow(QMainWindow):
             self._canvas.set_current_boxes_visible(False)
             self._current_boxes_hidden_for_overlay = True
         self._canvas.show_reference_boxes(boxes, label)
-        self._canvas.set_overlay_notice(notice)
+        self._canvas.set_overlay_notice(notice, notice_id="adjacent")
         self._status.showMessage(f"Showing {label} boxes while key is held.")
 
     def _clear_adjacent_overlay(self, key: int):
@@ -649,6 +784,7 @@ class MainWindow(QMainWindow):
     def _on_box_selected(self, box: Box):
         self._clear_pending_id_state()
         self._selected_box = box
+        self._canvas.clear_warning_notices()
         self._id_input.setEnabled(True)
         self._btn_assign.setEnabled(True)
         self._btn_remove_id.setEnabled(True)
@@ -668,6 +804,7 @@ class MainWindow(QMainWindow):
     def _on_box_deselected(self):
         self._clear_pending_id_state()
         self._selected_box = None
+        self._canvas.clear_warning_notices()
         self._id_input.setEnabled(False)
         self._btn_assign.setEnabled(False)
         self._btn_remove_id.setEnabled(False)
@@ -727,11 +864,13 @@ class MainWindow(QMainWindow):
         self._push_undo()
         self._selected_box.identity = identity
         self._canvas.refresh_boxes()
+        self._canvas.clear_warning_notices()
         self._canvas.clear_highlight()
         self._lbl_box_info.setText(f"Identity: {identity}")
         self._mark_dirty(self._current_index)
         self._pending_id_confirm = None
         self._show_identity_trajectory_if_complete(identity)
+        self._update_id_summary()
         self._status.showMessage(f"Assigned identity {identity}.", 3000)
 
     def _on_id_input_changed(self, text: str):
@@ -772,8 +911,10 @@ class MainWindow(QMainWindow):
         self._id_input.clear()
         self._clear_pending_id_state()
         self._canvas.refresh_boxes()
+        self._canvas.clear_warning_notices()
         self._lbl_box_info.setText("Unassigned box")
         self._mark_dirty(self._current_index)
+        self._update_id_summary()
         self._status.showMessage("Identity cleared.", 3000)
 
     def _delete_selected_box(self):
@@ -785,6 +926,7 @@ class MainWindow(QMainWindow):
             boxes.remove(self._selected_box)
             self._selected_box = None
             self._mark_dirty(self._current_index)
+            self._canvas.clear_warning_notices()
             self._goto_frame(self._current_index)
             self._status.showMessage("Box deleted.", 3000)
 
@@ -793,6 +935,7 @@ class MainWindow(QMainWindow):
             self._status.showMessage("No selected box to copy.", 3000)
             return
         self._copied_box = self._copy_box(self._selected_box)
+        self._canvas.clear_warning_notices()
         self._status.showMessage("Box copied.", 3000)
 
     def _paste_copied_box(self):
@@ -808,6 +951,7 @@ class MainWindow(QMainWindow):
         self._push_undo()
         self._get_boxes(self._current_index).append(box)
         self._mark_dirty(self._current_index)
+        self._canvas.clear_warning_notices()
         self._goto_frame(self._current_index)
 
     def _toggle_draw_box(self, enabled: bool):
@@ -820,11 +964,13 @@ class MainWindow(QMainWindow):
         boxes.append(box)
         self._mark_dirty(self._current_index)
         self._btn_draw_box.setChecked(False)
+        self._canvas.clear_warning_notices()
         self._goto_frame(self._current_index)
         self._status.showMessage("New box drawn.", 3000)
 
     def _on_box_changed(self, box: Box):
         self._mark_dirty(self._current_index)
+        self._update_id_summary()
         self._status.showMessage("Box geometry changed.", 2000)
 
     def _on_box_change_started(self, box: Box):
@@ -886,10 +1032,11 @@ class MainWindow(QMainWindow):
             self._timeline.set_completed(index, False)
             if index == self._current_index:
                 self._btn_complete.setChecked(False)
-                self._btn_complete.setText("Mark Completed  ✓")
+                self._btn_complete.setText("Mark Completed")
         self._lbl_frame.setText(
             f"Frame: {index + 1} / {len(self._frame_paths)} *"
         )
+        self._update_save_state()
 
     def _toggle_box_geometry_locks(self, state: int):
         position_locked = self._chk_lock_position.isChecked()
@@ -936,6 +1083,8 @@ class MainWindow(QMainWindow):
         if applied:
             self._mark_dirty(idx)
             self._canvas.refresh_boxes()
+            self._canvas.clear_warning_notices()
+            self._update_id_summary()
             self._status.showMessage(f"Suggested {applied} ID(s) with {self._tracker_algo.currentText()}.", 4000)
         else:
             self._status.showMessage("No confident ID suggestions found.", 4000)
@@ -947,13 +1096,13 @@ class MainWindow(QMainWindow):
         done = self._btn_complete.isChecked()
         self._completed[idx] = done
         self._timeline.set_completed(idx, done)
-        self._btn_complete.setText("✓ Completed" if done else "Mark Completed  ✓")
+        self._btn_complete.setText("Completed" if done else "Mark Completed")
         if done:
             if not self._save_current():
                 self._completed[idx] = False
                 self._timeline.set_completed(idx, False)
                 self._btn_complete.setChecked(False)
-                self._btn_complete.setText("Mark Completed  ✓")
+                self._btn_complete.setText("Mark Completed")
                 return
         self._reload_boxes_for_frame(idx)
 
@@ -977,7 +1126,9 @@ class MainWindow(QMainWindow):
         if idx == self._current_index:
             self._canvas.clear_reference_boxes()
             self._lbl_frame.setText(f"Frame: {idx + 1} / {len(self._frame_paths)}")
-        self._status.showMessage(f"Saved {gt_path.name}", 3000)
+            self._update_id_summary()
+        self._update_save_state()
+        self._status.showMessage(f"Saved frame {idx + 1}: {gt_path.name}", 3000)
         return True
 
     def _gt_path_for_index(self, idx: int) -> Path:
@@ -1004,6 +1155,44 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress and not event.isAutoRepeat():
+            if self._handle_global_shortcut(event):
+                return True
+        return super().eventFilter(obj, event)
+
+    def _handle_global_shortcut(self, event) -> bool:
+        if QApplication.activeModalWidget() is not None:
+            return False
+        focus = QApplication.focusWidget()
+        if focus is not None and focus is not self and not self.isAncestorOf(focus):
+            return False
+        mods = event.modifiers()
+        key = event.key()
+        primary_only = bool(mods & (Qt.ControlModifier | Qt.MetaModifier)) and not (mods & Qt.AltModifier)
+        if primary_only and key == Qt.Key_S:
+            self._save_current()
+            return True
+        if primary_only and key == Qt.Key_C:
+            self._copy_selected_box()
+            return True
+        if primary_only and key == Qt.Key_V:
+            self._paste_copied_box()
+            return True
+        if primary_only and key == Qt.Key_Z:
+            self._undo_current_frame()
+            return True
+        if primary_only and key == Qt.Key_G:
+            self._goto_frame_dialog()
+            return True
+        if primary_only and key == Qt.Key_Return:
+            self._toggle_completed()
+            return True
+        if mods == Qt.NoModifier and key in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._delete_selected_box()
+            return True
+        return False
+
     # ------------------------------------------------------------------ key events
 
     def keyPressEvent(self, event):
@@ -1018,7 +1207,7 @@ class MainWindow(QMainWindow):
             self._next_frame()
         elif key == Qt.Key_Left and not id_focused:
             self._prev_frame()
-        elif key == Qt.Key_Delete and not id_focused:
+        elif key in (Qt.Key_Delete, Qt.Key_Backspace) and not id_focused:
             self._delete_selected_box()
         elif key == Qt.Key_B and not id_focused:
             self._btn_draw_box.setChecked(not self._btn_draw_box.isChecked())

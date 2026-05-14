@@ -3,9 +3,7 @@
 # Label & Track
 
 **A desktop tool for annotating multi-object tracking datasets — fast, keyboard-driven, and built for precision.**<br>
-<em>Fully implemented by <a href="https://openai.com/codex/"><img src="docs/codex.png" alt="Codex" height="18" /></a> and <a href="https://www.anthropic.com/claude-code"><img src="docs/claudecode-color.svg" alt="Claude Code" height="18" /></a></em>
-
-
+*<em>Fully implemented by <a href="https://openai.com/codex/"><img src="docs/codex.png" alt="Codex" height="18" /></a> and <a href="https://www.anthropic.com/claude-code"><img src="docs/claudecode-color.svg" alt="Claude Code" height="18" /></a>*<br>
 [![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![PyQt5](https://img.shields.io/badge/PyQt5-5.15%2B-41CD52?style=flat-square)](https://pypi.org/project/PyQt5/)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)

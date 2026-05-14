@@ -1,10 +1,10 @@
 from __future__ import annotations
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, pyqtSignal
 from PyQt5.QtGui import (QPainter, QPen, QBrush, QColor, QPixmap,
-                          QFont, QCursor, QPainterPath)
+                          QFont, QCursor, QPainterPath, QFontDatabase)
 from PyQt5.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsItem,
                               QGraphicsPathItem, QGraphicsPixmapItem,
                               QGraphicsRectItem, QLabel)
@@ -142,9 +142,9 @@ class BoxItem(QGraphicsItem):
         # Identity label, drawn inside the top-right corner without a filled badge.
         if self.box.identity >= 0:
             label = str(self.box.identity)
-            if self.reference_label:
-                label = f"{self.reference_label}:{label}"
-            font = QFont("Monospace", 11, QFont.Bold)
+            font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+            font.setPointSize(11)
+            font.setBold(True)
             if self.is_reference:
                 font.setItalic(True)
             painter.setFont(font)
@@ -300,9 +300,8 @@ class ImageCanvas(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setBackgroundBrush(QBrush(QColor(35, 35, 35)))
         self._try_enable_opengl_viewport()
-        self._overlay_badge = QLabel(self)
-        self._overlay_badge.setStyleSheet(self._notice_style("overlay"))
-        self._overlay_badge.hide()
+        self._overlay_notices: Dict[str, QLabel] = {}
+        self._warning_notices: Dict[str, QLabel] = {}
         self._minimap = QLabel(self)
         self._minimap.setStyleSheet(
             "background: rgba(17, 24, 39, 190); border: 1px solid #f8fafc;"
@@ -483,37 +482,58 @@ class ImageCanvas(QGraphicsView):
             line.setZValue(2.5)
             self._scene.addItem(line)
             self._trajectory_items.append(line)
-        self.set_overlay_notice(f"Trajectory: ID {identity}")
+        self.set_overlay_notice(f"Trajectory: ID {identity}", notice_id="trajectory")
 
     def _notice_style(self, kind: str) -> str:
         if kind == "warning":
             return (
                 "background: #dc2626; color: #ffffff; border: 1px solid #7f1d1d; "
-                "border-radius: 4px; padding: 5px 9px; font-weight: 800; "
-                "font-size: 13px;"
+                "border-radius: 6px; padding: 8px 12px; font-weight: 800; "
+                "font-size: 15px;"
             )
         return (
             "background: #ffd166; color: #111827; border: 1px solid #9a6700; "
-            "border-radius: 4px; padding: 5px 9px; font-weight: 800; "
-            "font-size: 13px;"
+            "border-radius: 6px; padding: 8px 12px; font-weight: 800; "
+            "font-size: 15px;"
         )
 
-    def set_overlay_notice(self, text: str):
-        self._set_notice(text, "overlay")
+    def set_overlay_notice(self, text: str, notice_id: str = "overlay"):
+        self._set_notice(text, "overlay", notice_id)
 
-    def set_warning_notice(self, text: str):
-        self._set_notice(text, "warning")
+    def set_warning_notice(self, text: str, notice_id: str = "warning"):
+        self._set_notice(text, "warning", notice_id)
 
-    def _set_notice(self, text: str, kind: str):
+    def _notice_map(self, kind: str) -> Dict[str, QLabel]:
+        return self._warning_notices if kind == "warning" else self._overlay_notices
+
+    def _set_notice(self, text: str, kind: str, notice_id: str):
+        notices = self._notice_map(kind)
+        label = notices.get(notice_id)
+        if label is None:
+            label = QLabel(self.viewport())
+            label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            label.hide()
+            notices[notice_id] = label
         if text:
-            self._overlay_badge.setStyleSheet(self._notice_style(kind))
-            self._overlay_badge.setText(text)
-            self._overlay_badge.adjustSize()
-            self._position_overlay_badge()
-            self._overlay_badge.show()
-            self._overlay_badge.raise_()
+            label.setStyleSheet(self._notice_style(kind))
+            label.setText(text)
+            label.adjustSize()
+            label.show()
+            label.raise_()
         else:
-            self._overlay_badge.hide()
+            label.hide()
+        self._position_notice_stack(kind)
+
+    def clear_overlay_notices(self):
+        self._clear_notice_stack("overlay")
+
+    def clear_warning_notices(self):
+        self._clear_notice_stack("warning")
+
+    def _clear_notice_stack(self, kind: str):
+        for label in self._notice_map(kind).values():
+            label.hide()
+        self._position_notice_stack(kind)
 
     def clear_reference_boxes(self):
         for item in self._reference_items:
@@ -525,7 +545,7 @@ class ImageCanvas(QGraphicsView):
                 self._scene.removeItem(item)
         self._trajectory_items.clear()
         self._overlay_active = False
-        self.set_overlay_notice("")
+        self.clear_overlay_notices()
 
     def set_draw_mode(self, enabled: bool):
         self._draw_mode = enabled
@@ -554,16 +574,25 @@ class ImageCanvas(QGraphicsView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._position_overlay_badge()
+        self._position_notice_stack("overlay")
+        self._position_notice_stack("warning")
         self._position_minimap()
         self._update_minimap()
 
-    def _position_overlay_badge(self):
-        if not self._overlay_badge.isVisible():
+    def _position_notice_stack(self, kind: str):
+        visible = [label for label in self._notice_map(kind).values() if label.isVisible()]
+        if not visible:
             return
         margin = 12
-        x = self.viewport().width() - self._overlay_badge.width() - margin
-        self._overlay_badge.move(max(margin, x), margin)
+        gap = 8
+        y = margin
+        for label in visible:
+            if kind == "warning":
+                x = self.viewport().width() - label.width() - margin
+                label.move(max(margin, x), y)
+            else:
+                label.move(margin, y)
+            y += label.height() + gap
 
     def _position_minimap(self):
         margin = 12

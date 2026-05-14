@@ -336,8 +336,15 @@ class MainWindow(QMainWindow):
         summary_grp = QGroupBox("ID Summary (against prev)")
         sg = QVBoxLayout(summary_grp)
         self._lbl_id_summary = QLabel("No dataset loaded.")
+        self._lbl_id_summary.setTextFormat(Qt.RichText)
         self._lbl_id_summary.setWordWrap(True)
         self._lbl_id_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._lbl_id_summary.setStyleSheet(
+            "QLabel {"
+            "background: #f1f5f9; border: 1px solid #d8e0ea; border-radius: 5px; "
+            "padding: 7px; color: #111827;"
+            "}"
+        )
         sg.addWidget(self._lbl_id_summary)
         layout.addWidget(summary_grp)
 
@@ -538,6 +545,23 @@ class MainWindow(QMainWindow):
     def _format_id_list(self, ids: List[int]) -> str:
         return ", ".join(str(identity) for identity in ids) if ids else "None"
 
+    def _id_summary_html(self, rows: List[tuple]) -> str:
+        rendered_rows = []
+        for label, value, color in rows:
+            rendered_rows.append(
+                "<tr>"
+                f"<td style='padding:2px 8px 2px 0; color:#334155; white-space:nowrap;'><b>{label}</b></td>"
+                f"<td style='padding:2px 0; color:{color};'>{value}</td>"
+                "</tr>"
+            )
+        return (
+            "<div style='line-height:1.35;'>"
+            "<table cellspacing='0' cellpadding='0' width='100%'>"
+            + "".join(rendered_rows)
+            + "</table>"
+            "</div>"
+        )
+
     def _set_save_state_label(self, text: str, *, background: str, border: str, foreground: str):
         self._lbl_save_state.setText(text)
         self._lbl_save_state.setStyleSheet(
@@ -570,25 +594,37 @@ class MainWindow(QMainWindow):
 
     def _update_id_summary(self):
         if not self._frame_paths:
-            self._lbl_id_summary.setText("No dataset loaded.")
-            return
-        if self._current_index <= 0:
-            curr_ids = sorted({box.identity for box in self._get_boxes(self._current_index) if box.identity >= 0})
             self._lbl_id_summary.setText(
-                "Previous frame: none\n"
-                f"Current IDs: {self._format_id_list(curr_ids)}"
+                self._id_summary_html([("Status", "No dataset loaded.", "#64748b")])
+            )
+            return
+        curr_boxes = self._get_boxes(self._current_index)
+        curr_ids = {box.identity for box in curr_boxes if box.identity >= 0}
+        unassigned = sum(1 for box in curr_boxes if box.identity < 0)
+        total = len(curr_boxes)
+        if self._current_index <= 0:
+            self._lbl_id_summary.setText(
+                self._id_summary_html([
+                    ("Against", "No previous frame", "#64748b"),
+                    ("Stayed", "None", "#64748b"),
+                    ("Added", self._format_id_list(sorted(curr_ids)), "#166534"),
+                    ("Disappeared", "None", "#64748b"),
+                    ("Unassigned boxes", f"{unassigned} / {total}", "#9a3412" if unassigned else "#166534"),
+                ])
             )
             return
         prev_ids = {box.identity for box in self._get_boxes(self._current_index - 1) if box.identity >= 0}
-        curr_ids = {box.identity for box in self._get_boxes(self._current_index) if box.identity >= 0}
         stayed = sorted(prev_ids & curr_ids)
         added = sorted(curr_ids - prev_ids)
         disappeared = sorted(prev_ids - curr_ids)
         self._lbl_id_summary.setText(
-            f"Prev frame: {self._current_index}\n"
-            f"Stayed ({len(stayed)}): {self._format_id_list(stayed)}\n"
-            f"Added ({len(added)}): {self._format_id_list(added)}\n"
-            f"Disappeared ({len(disappeared)}): {self._format_id_list(disappeared)}"
+            self._id_summary_html([
+                ("Against", f"Frame {self._current_index}", "#475569"),
+                ("Stayed", f"{len(stayed)} - {self._format_id_list(stayed)}", "#1d4ed8"),
+                ("Added", f"{len(added)} - {self._format_id_list(added)}", "#166534"),
+                ("Disappeared", f"{len(disappeared)} - {self._format_id_list(disappeared)}", "#b91c1c"),
+                ("Unassigned boxes", f"{unassigned} / {total}", "#9a3412" if unassigned else "#166534"),
+            ])
         )
 
     def _handle_dirty_before_context_change(self, action: str) -> bool:

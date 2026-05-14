@@ -50,6 +50,8 @@ Multi-object tracking annotation needs more than drawing boxes. It also needs **
 - **Past trajectory review** helps check whether an ID belongs to the same object
 - **OmniSORT-based ID suggestion** propagates IDs from the previous completed frame
 
+**About OmniSORT.** Label & Track uses a lightweight, interactive adaptation of OmniSORT for annotation-time ID suggestion. Instead of running a full tracker across the entire sequence, it matches the current frame's unassigned boxes against identities from the previous completed frame and proposes one-to-one assignments to speed up manual labeling. The original OmniSORT tracker is also publicly available at [Xin-Shu/OmniSORT](https://github.com/Xin-Shu/OmniSORT).
+
 ### Navigation & Overlays
 - **Frame timeline** with async thumbnail loading and completion indicators
 - **Jump to any frame** directly by number (Ctrl+G)
@@ -172,7 +174,7 @@ A typical session looks like this:
    - If the same ID already exists in the frame, the conflict is highlighted.
    - If the ID was previously used by a different object, the past trajectory is shown before confirmation.
 4. **Add missing boxes** — press `B` (or click *Draw Box*), drag a rectangle on the canvas, then assign an ID.
-5. **Use ID suggestions** — click *Suggest IDs* in the *ID Suggestions* panel to auto-propagate IDs from the previous completed frame using the OmniSORT algorithm.
+5. **Use ID suggestions** — click *Suggest IDs* in the *ID Suggestions* panel to auto-propagate IDs from the previous completed frame using the app's interactive OmniSORT-based matcher.
 6. **Compare with adjacent frames** — hold `Q` or `W` to ghost the previous or next frame's boxes over the current view. This helps verify spatial consistency without navigating away.
 7. **Mark complete** — press `Ctrl+Enter` when a frame is fully annotated. The frame turns green in the timeline and the labels are saved to `label_gt/`.
 8. **Save at any time** — press `Ctrl+S`.

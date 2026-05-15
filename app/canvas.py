@@ -12,7 +12,14 @@ from PyQt5.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsItem,
 from colors import get_color
 from label_io import Box
 
-HANDLE_SIZE = 9   # pixels (scene coords)
+HANDLE_SIZE = 9   # visible pixels
+BOX_STROKE_PX = 1.45
+SELECTED_BOX_STROKE_PX = 2.0
+REFERENCE_BOX_STROKE_PX = 1.25
+HIGHLIGHT_STROKE_PX = 2.6
+HANDLE_STROKE_PX = 0.8
+DRAW_BOX_STROKE_PX = 1.45
+TRAJECTORY_STROKE_PX = 1.25
 _H_TL, _H_TM, _H_TR = 0, 1, 2
 _H_ML, _H_MR        = 3, 4
 _H_BL, _H_BM, _H_BR = 5, 6, 7
@@ -74,6 +81,16 @@ class BoxItem(QGraphicsItem):
     def _handle_size_scene(self) -> float:
         return HANDLE_SIZE / self._view_scale()
 
+    def _scene_units_for_view_pixels(self, pixels: float) -> float:
+        return max(pixels / self._view_scale(), 0.05)
+
+    def _adaptive_pen(self, color, pixels: float, style=Qt.SolidLine) -> QPen:
+        pen = QPen(color)
+        pen.setWidthF(self._scene_units_for_view_pixels(pixels))
+        pen.setStyle(style)
+        pen.setCosmetic(False)
+        return pen
+
     def set_geometry_locks(self, position_locked: bool, size_locked: bool):
         self.position_locked = position_locked
         self.size_locked = size_locked
@@ -129,12 +146,13 @@ class BoxItem(QGraphicsItem):
         if not self.is_reference:
             self.setZValue(self._current_box_z())
 
-        # Box outline
-        pen = QPen(color, 3 if selected else 2)
+        # Box outline. Width is kept in view pixels so it does not grow with zoom.
+        stroke_px = SELECTED_BOX_STROKE_PX if selected else BOX_STROKE_PX
+        style = Qt.SolidLine
         if self.is_reference:
-            pen.setWidth(2)
-            pen.setStyle(Qt.DashLine)
-        pen.setCosmetic(False)
+            stroke_px = REFERENCE_BOX_STROKE_PX
+            style = Qt.DashLine
+        pen = self._adaptive_pen(color, stroke_px, style)
         painter.setPen(pen)
         painter.setBrush(QBrush(Qt.NoBrush))
         painter.drawRect(r)
@@ -163,18 +181,15 @@ class BoxItem(QGraphicsItem):
 
         # Conflict-highlight ring (drawn outside the box rect)
         if self.highlighted and not self.is_reference:
-            vs = self._view_scale()
-            pad = 4 / vs
-            h_pen = QPen(QColor(255, 100, 0), 4 / vs)
-            h_pen.setStyle(Qt.DashLine)
-            h_pen.setCosmetic(False)
+            pad = self._scene_units_for_view_pixels(3)
+            h_pen = self._adaptive_pen(QColor(255, 100, 0), HIGHLIGHT_STROKE_PX, Qt.DashLine)
             painter.setPen(h_pen)
             painter.setBrush(QBrush(Qt.NoBrush))
             painter.drawRect(r.adjusted(-pad, -pad, pad, pad))
 
         # Resize handles (only when selected)
         if selected and not self.size_locked:
-            painter.setPen(QPen(Qt.white, 1))
+            painter.setPen(self._adaptive_pen(Qt.white, HANDLE_STROKE_PX))
             painter.setBrush(QBrush(color))
             for hr in self._handle_rects().values():
                 painter.drawRect(hr)
@@ -574,8 +589,10 @@ class ImageCanvas(QGraphicsView):
             for point in centers[1:]:
                 path.lineTo(point)
             line = QGraphicsPathItem(path)
-            pen = QPen(color, 2)
+            pen = QPen(color)
+            pen.setWidthF(TRAJECTORY_STROKE_PX)
             pen.setStyle(Qt.DotLine)
+            pen.setCosmetic(True)
             line.setPen(pen)
             line.setZValue(2.5)
             self._scene.addItem(line)
@@ -770,8 +787,10 @@ class ImageCanvas(QGraphicsView):
         if self._draw_mode and event.button() == Qt.LeftButton and self._frame_pixmap is not None:
             self._draw_start = self.mapToScene(event.pos())
             self._draw_item = QGraphicsRectItem(QRectF(self._draw_start, self._draw_start))
-            pen = QPen(QColor(255, 209, 102), 2)
+            pen = QPen(QColor(255, 209, 102))
+            pen.setWidthF(DRAW_BOX_STROKE_PX)
             pen.setStyle(Qt.DashLine)
+            pen.setCosmetic(True)
             self._draw_item.setPen(pen)
             self._draw_item.setBrush(QBrush(Qt.NoBrush))
             self._draw_item.setZValue(6)

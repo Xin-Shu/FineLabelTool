@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsItem,
                               QGraphicsRectItem, QLabel)
 
 from colors import get_color
-from label_io import Box
+from label_io import Box, snap_box_to_pixel_grid, snap_boxes_to_pixel_grid
 
 HANDLE_SIZE = 9   # visible pixels
 BOX_STROKE_PX = 1.45
@@ -103,7 +103,15 @@ class BoxItem(QGraphicsItem):
         b = self.box
         x = (b.x_center - b.width  / 2) * self.img_w
         y = (b.y_center - b.height / 2) * self.img_h
-        return QRectF(x, y, b.width * self.img_w, b.height * self.img_h)
+        return self._snap_rect_to_pixel_grid(QRectF(x, y, b.width * self.img_w, b.height * self.img_h))
+
+    def _snap_rect_to_pixel_grid(self, rect: QRectF) -> QRectF:
+        rect = rect.normalized()
+        left = max(0, min(self.img_w - 1, int(rect.left() + 0.5)))
+        top = max(0, min(self.img_h - 1, int(rect.top() + 0.5)))
+        right = max(left + 1, min(self.img_w, int(rect.right() + 0.5)))
+        bottom = max(top + 1, min(self.img_h, int(rect.bottom() + 0.5)))
+        return QRectF(left, top, right - left, bottom - top)
 
     def _handle_rects(self) -> dict:
         r = self._pixel_rect()
@@ -271,16 +279,16 @@ class BoxItem(QGraphicsItem):
 
         # Clamp to image
         img_rect = QRectF(0, 0, self.img_w, self.img_h)
-        r = r.intersected(img_rect)
+        r = self._snap_rect_to_pixel_grid(r.intersected(img_rect))
         if r.width() < 2 or r.height() < 2:
             return
 
         self.prepareGeometryChange()
         b = self.box
-        b.x_center = (r.left() + r.width()  / 2) / self.img_w
-        b.y_center = (r.top()  + r.height() / 2) / self.img_h
-        b.width    = r.width()  / self.img_w
-        b.height   = r.height() / self.img_h
+        b.x_center = (r.left() + r.width() / 2) / self.img_w
+        b.y_center = (r.top() + r.height() / 2) / self.img_h
+        b.width = r.width() / self.img_w
+        b.height = r.height() / self.img_h
         self.update()
 
     def mouseReleaseEvent(self, event):
@@ -392,6 +400,14 @@ class ImageCanvas(QGraphicsView):
                 return item
         return None
 
+    def _snap_rect_to_pixel_grid(self, rect: QRectF) -> QRectF:
+        rect = rect.normalized()
+        left = max(0, min(self._img_w - 1, int(rect.left() + 0.5)))
+        top = max(0, min(self._img_h - 1, int(rect.top() + 0.5)))
+        right = max(left + 1, min(self._img_w, int(rect.right() + 0.5)))
+        bottom = max(top + 1, min(self._img_h, int(rect.bottom() + 0.5)))
+        return QRectF(left, top, right - left, bottom - top)
+
     def load_frame(self, pixmap: QPixmap, boxes: List[Box], keep_zoom: bool = False):
         old_transform = self.transform() if keep_zoom else None
         old_center = self.mapToScene(self.viewport().rect().center()) if keep_zoom else None
@@ -411,6 +427,7 @@ class ImageCanvas(QGraphicsView):
         self._img_h = pixmap.height()
         self._frame_pixmap = pixmap
         self._minimap_base = None
+        snap_boxes_to_pixel_grid(boxes, self._img_w, self._img_h)
 
         self._scene.addItem(QGraphicsPixmapItem(pixmap))
         for box in boxes:
@@ -555,6 +572,7 @@ class ImageCanvas(QGraphicsView):
         self.clear_reference_boxes()
         self._overlay_active = True
         self._panning = False
+        snap_boxes_to_pixel_grid(boxes, self._img_w, self._img_h)
         for box in boxes:
             item = BoxItem(
                 box,
@@ -571,6 +589,7 @@ class ImageCanvas(QGraphicsView):
             return
         self._overlay_active = True
         self._panning = False
+        snap_boxes_to_pixel_grid(boxes, self._img_w, self._img_h)
         color = get_color(identity)
         centers = []
         for box in boxes:
@@ -821,7 +840,9 @@ class ImageCanvas(QGraphicsView):
         if self._draw_mode and self._draw_item is not None and self._draw_start is not None:
             current = self.mapToScene(event.pos())
             img_rect = QRectF(0, 0, self._img_w, self._img_h)
-            rect = QRectF(self._draw_start, current).normalized().intersected(img_rect)
+            rect = self._snap_rect_to_pixel_grid(
+                QRectF(self._draw_start, current).normalized().intersected(img_rect)
+            )
             self._draw_item.setRect(rect)
             event.accept()
             return
@@ -835,7 +856,7 @@ class ImageCanvas(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         if self._draw_mode and event.button() == Qt.LeftButton and self._draw_item is not None:
-            rect = self._draw_item.rect().normalized()
+            rect = self._snap_rect_to_pixel_grid(self._draw_item.rect().normalized())
             self._scene.removeItem(self._draw_item)
             self._draw_item = None
             self._draw_start = None
@@ -849,6 +870,7 @@ class ImageCanvas(QGraphicsView):
                     class_id=0,
                     identity=-1,
                 )
+                snap_box_to_pixel_grid(box, self._img_w, self._img_h)
                 self.box_drawn.emit(box)
             event.accept()
             return

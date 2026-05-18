@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PyQt5.QtCore import QEvent, QSize, QSettings, Qt, QTimer
-from PyQt5.QtGui import QFont, QKeySequence, QPixmap
+from PyQt5.QtGui import QFont, QImageReader, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QInputDialog,
     QLabel, QApplication, QComboBox, QHeaderView, QKeySequenceEdit, QLineEdit,
@@ -19,6 +19,8 @@ from label_io import (
     Box,
     read_det_labels,
     read_gt_labels,
+    snap_box_to_pixel_grid,
+    snap_boxes_to_pixel_grid,
     write_gt_labels,
 )
 from timeline import TimelineWidget
@@ -1035,13 +1037,32 @@ class MainWindow(QMainWindow):
                 boxes = read_gt_labels(gt_path)
             else:
                 boxes = read_det_labels(det_path)
+            self._snap_boxes_for_index(index, boxes)
             self._boxes_per_frame[index] = boxes
         return self._boxes_per_frame[index]
 
     def _get_detection_boxes(self, index: int) -> List[Box]:
         stem = self._frame_paths[index].stem
         det_path = self._clip_path / "label_det" / f"{stem}.txt"
-        return read_det_labels(det_path)
+        boxes = read_det_labels(det_path)
+        self._snap_boxes_for_index(index, boxes)
+        return boxes
+
+    def _frame_image_size(self, index: int) -> Optional[QSize]:
+        if not 0 <= index < len(self._frame_paths):
+            return None
+        size = QImageReader(str(self._frame_paths[index])).size()
+        return size if size.isValid() else None
+
+    def _snap_boxes_for_index(self, index: int, boxes: List[Box]) -> None:
+        size = self._frame_image_size(index)
+        if size is not None:
+            snap_boxes_to_pixel_grid(boxes, size.width(), size.height())
+
+    def _snap_box_for_index(self, index: int, box: Box) -> None:
+        size = self._frame_image_size(index)
+        if size is not None:
+            snap_box_to_pixel_grid(box, size.width(), size.height())
 
     def _box_xyxy(self, box: Box) -> List[float]:
         return [
@@ -1364,6 +1385,7 @@ class MainWindow(QMainWindow):
             self._status.showMessage("No copied box to paste.", 3000)
             return
         box = self._copy_box(self._copied_box)
+        self._snap_box_for_index(self._current_index, box)
         if box.identity >= 0 and self._identity_used_in_current_frame(box.identity, box):
             box.identity = -1
             self._status.showMessage("Box pasted without ID — that ID is already used in this frame.", 4000)
@@ -1384,6 +1406,7 @@ class MainWindow(QMainWindow):
 
     def _on_box_drawn(self, box: Box):
         boxes = self._get_boxes(self._current_index)
+        self._snap_box_for_index(self._current_index, box)
         self._push_undo()
         boxes.append(box)
         self._mark_dirty(self._current_index)
@@ -1393,6 +1416,8 @@ class MainWindow(QMainWindow):
         self._status.showMessage("New box drawn.", 3000)
 
     def _on_box_changed(self, box: Box):
+        self._snap_box_for_index(self._current_index, box)
+        self._canvas.refresh_boxes()
         self._mark_dirty(self._current_index)
         self._update_id_summary()
         self._status.showMessage("Box geometry changed.", 2000)
@@ -1546,6 +1571,7 @@ class MainWindow(QMainWindow):
         if not self._clip_path or not self._frame_paths:
             return False
         boxes = self._get_boxes(idx)
+        self._snap_boxes_for_index(idx, boxes)
         gt_path = self._gt_path_for_index(idx)
         if not write_gt_labels(gt_path, boxes):
             QMessageBox.critical(

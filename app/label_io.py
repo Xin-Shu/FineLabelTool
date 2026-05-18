@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from math import floor
 from pathlib import Path
 from typing import List
 
@@ -12,6 +13,36 @@ class Box:
     confidence: float = 1.0
     class_id: int = 0      # detection class (from det label first column)
     identity: int = -1     # user-assigned tracking ID (-1 = unassigned)
+
+
+def _round_pixel(value: float) -> int:
+    return int(floor(value + 0.5))
+
+
+def snap_box_to_pixel_grid(box: Box, img_w: int, img_h: int) -> None:
+    """Mutate a normalized box so its pixel x1/y1/x2/y2 are integers."""
+    if img_w <= 0 or img_h <= 0:
+        return
+
+    left = _round_pixel((box.x_center - box.width / 2) * img_w)
+    top = _round_pixel((box.y_center - box.height / 2) * img_h)
+    right = _round_pixel((box.x_center + box.width / 2) * img_w)
+    bottom = _round_pixel((box.y_center + box.height / 2) * img_h)
+
+    left = max(0, min(img_w - 1, left))
+    top = max(0, min(img_h - 1, top))
+    right = max(left + 1, min(img_w, right))
+    bottom = max(top + 1, min(img_h, bottom))
+
+    box.x_center = ((left + right) / 2) / img_w
+    box.y_center = ((top + bottom) / 2) / img_h
+    box.width = (right - left) / img_w
+    box.height = (bottom - top) / img_h
+
+
+def snap_boxes_to_pixel_grid(boxes: List[Box], img_w: int, img_h: int) -> None:
+    for box in boxes:
+        snap_box_to_pixel_grid(box, img_w, img_h)
 
 
 def read_det_labels(path: Path) -> List[Box]:

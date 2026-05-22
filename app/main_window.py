@@ -3,17 +3,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import QEvent, QSize, QSettings, Qt, QTimer
+from PyQt5.QtCore import QEvent, QObject, QSize, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QImageReader, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QInputDialog,
-    QLabel, QApplication, QComboBox, QHeaderView, QKeySequenceEdit, QLineEdit,
+    QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QGroupBox, QHBoxLayout,
+    QInputDialog, QLabel, QApplication, QComboBox, QHeaderView, QKeySequenceEdit, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
-    QScrollArea, QShortcut, QSplitter, QStatusBar, QTableWidget,
+    QScrollArea, QShortcut, QSpinBox, QSplitter, QStatusBar, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from canvas import ImageCanvas
+from algo.detector import DetectorError, suggest_detections, train_detector, trained_model_path
 from algo.omnisort import suggest_ids_from_previous
 from label_io import (
     Box,
@@ -34,7 +35,8 @@ HOTKEY_DEFS = [
     ("fit_view", "Fit image to view", "F"),
     ("draw_box", "Draw box mode", "B"),
     ("delete_box", "Delete selected box", "Del"),
-    ("copy", "Copy selected box", "Ctrl+C"),
+    ("select_all", "Select all boxes", "Ctrl+A"),
+    ("copy", "Copy selected boxes", "Ctrl+C"),
     ("paste", "Paste copied box", "Ctrl+V"),
     ("undo", "Undo current-frame edit", "Ctrl+Z"),
     ("goto_frame", "Go to frame", "Ctrl+G"),
@@ -238,6 +240,73 @@ class HotkeyDialog(QDialog):
         return values
 
 
+class _DetectorPredictWorker(QObject):
+    finished = pyqtSignal(int, object, str, str)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, index: int, image_path: Path, clip_path: Path, base_model: str, confidence: float, image_size: int):
+        super().__init__()
+        self.index = index
+        self.image_path = image_path
+        self.clip_path = clip_path
+        self.base_model = base_model
+        self.confidence = confidence
+        self.image_size = image_size
+
+    def run(self):
+        try:
+            result = suggest_detections(
+                self.image_path,
+                self.clip_path,
+                base_model=self.base_model,
+                confidence=self.confidence,
+                image_size=self.image_size,
+            )
+            self.finished.emit(self.index, result.boxes, result.source, result.device)
+        except DetectorError as exc:
+            self.failed.emit(self.index, str(exc))
+        except Exception as exc:
+            self.failed.emit(self.index, f"Unexpected detector error: {exc}")
+
+
+class _DetectorTrainWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        clip_path: Path,
+        frame_paths: List[Path],
+        completed_indices: List[int],
+        base_model: str,
+        epochs: int,
+        image_size: int,
+    ):
+        super().__init__()
+        self.clip_path = clip_path
+        self.frame_paths = list(frame_paths)
+        self.completed_indices = list(completed_indices)
+        self.base_model = base_model
+        self.epochs = epochs
+        self.image_size = image_size
+
+    def run(self):
+        try:
+            result = train_detector(
+                self.clip_path,
+                self.frame_paths,
+                self.completed_indices,
+                base_model=self.base_model,
+                epochs=self.epochs,
+                image_size=self.image_size,
+            )
+            self.finished.emit(result)
+        except DetectorError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(f"Unexpected detector training error: {exc}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -250,7 +319,7 @@ class MainWindow(QMainWindow):
         self._completed: Dict[int, bool] = {}
         self._dirty_frames: set[int] = set()
         self._undo_stack: Dict[int, List[List[Box]]] = {}
-        self._copied_box: Optional[Box] = None
+        self._copied_boxes: List[Box] = []
         self._selected_box: Optional[Box] = None
         self._active_overlay_key: Optional[int] = None
         self._pending_id_confirm: Optional[int] = None
@@ -258,17 +327,29 @@ class MainWindow(QMainWindow):
         self._first_load = True
         self._direct_unassigned_cursor = 0
         self._direct_disappeared_cursor = 0
+        self._suggested_detection_boxes: List[Box] = []
+        self._detector_predict_thread: Optional[QThread] = None
+        self._detector_train_thread: Optional[QThread] = None
+        self._detector_predict_worker: Optional[QObject] = None
+        self._detector_train_worker: Optional[QObject] = None
+        self._detector_training = False
+        self._detector_prediction = False
+        self._detector_train_queued = False
         self._shortcuts: List[QShortcut] = []
         self._settings = QSettings("Xin-Shu", "FineLabelTool")
         self._hotkeys = self._load_hotkeys()
         font = QApplication.font()
         self._base_font_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
         self._ui_zoom = 1.0
+        self._detector_auto_timer = QTimer(self)
+        self._detector_auto_timer.setSingleShot(True)
+        self._detector_auto_timer.timeout.connect(self._start_detector_training)
 
         self._init_ui()
         self._setup_shortcuts()
         self._update_save_state()
         self._update_id_summary()
+        self._refresh_detector_status()
         self._apply_ui_zoom()
         self._fit_main_window_to_screen()
         QApplication.instance().installEventFilter(self)
@@ -427,7 +508,7 @@ class MainWindow(QMainWindow):
 
         self._btn_remove_id = QPushButton("Clear Identity")
         self._btn_remove_id.setEnabled(False)
-        self._btn_remove_id.setToolTip("Remove the identity from the selected box")
+        self._btn_remove_id.setToolTip("Remove identities from the selected box or boxes")
         self._btn_remove_id.clicked.connect(self._remove_identity)
         bg.addWidget(self._btn_remove_id)
 
@@ -469,6 +550,79 @@ class MainWindow(QMainWindow):
         fg.addWidget(self._btn_draw_box)
 
         layout.addWidget(frm_grp)
+
+        # --- detector assist group ---
+        detector_grp = QGroupBox("Detection Assist")
+        dg = QVBoxLayout(detector_grp)
+
+        detector_model_row = QHBoxLayout()
+        detector_model_row.addWidget(QLabel("Model:"))
+        self._detector_model = QComboBox()
+        self._detector_model.addItem("YOLO nano", "yolo11n.pt")
+        self._detector_model.addItem("YOLOv8 nano", "yolov8n.pt")
+        saved_model = self._settings.value("detector/base_model", "yolo11n.pt")
+        for row_idx in range(self._detector_model.count()):
+            if self._detector_model.itemData(row_idx) == saved_model:
+                self._detector_model.setCurrentIndex(row_idx)
+                break
+        self._detector_model.currentIndexChanged.connect(self._save_detector_settings)
+        detector_model_row.addWidget(self._detector_model, 1)
+        dg.addLayout(detector_model_row)
+
+        detector_opts_row = QHBoxLayout()
+        detector_opts_row.addWidget(QLabel("Conf:"))
+        self._detector_conf = QDoubleSpinBox()
+        self._detector_conf.setRange(0.01, 0.95)
+        self._detector_conf.setSingleStep(0.05)
+        self._detector_conf.setDecimals(2)
+        self._detector_conf.setValue(float(self._settings.value("detector/confidence", 0.25)))
+        self._detector_conf.valueChanged.connect(self._save_detector_settings)
+        detector_opts_row.addWidget(self._detector_conf)
+        detector_opts_row.addWidget(QLabel("Epochs:"))
+        self._detector_epochs = QSpinBox()
+        self._detector_epochs.setRange(1, 50)
+        self._detector_epochs.setValue(int(self._settings.value("detector/epochs", 6)))
+        self._detector_epochs.valueChanged.connect(self._save_detector_settings)
+        detector_opts_row.addWidget(self._detector_epochs)
+        dg.addLayout(detector_opts_row)
+
+        self._btn_suggest_detections = QPushButton("Suggest Detections")
+        self._btn_suggest_detections.setToolTip("Run the detector on the current frame without changing labels")
+        self._btn_suggest_detections.clicked.connect(self._suggest_detections_current_frame)
+        dg.addWidget(self._btn_suggest_detections)
+
+        detector_accept_row = QHBoxLayout()
+        self._btn_accept_detections = QPushButton("Accept New")
+        self._btn_accept_detections.setEnabled(False)
+        self._btn_accept_detections.setToolTip("Add suggested boxes that do not overlap existing boxes")
+        self._btn_accept_detections.clicked.connect(self._accept_suggested_detections)
+        self._btn_clear_detections = QPushButton("Clear")
+        self._btn_clear_detections.setEnabled(False)
+        self._btn_clear_detections.setToolTip("Hide current detector suggestions")
+        self._btn_clear_detections.clicked.connect(self._clear_suggested_detections)
+        detector_accept_row.addWidget(self._btn_accept_detections)
+        detector_accept_row.addWidget(self._btn_clear_detections)
+        dg.addLayout(detector_accept_row)
+
+        self._chk_detector_auto = QCheckBox("Auto-update after completed save")
+        auto_value = self._settings.value("detector/auto_update", True)
+        self._chk_detector_auto.setChecked(str(auto_value).lower() not in ("false", "0", "no"))
+        self._chk_detector_auto.stateChanged.connect(self._save_detector_settings)
+        dg.addWidget(self._chk_detector_auto)
+
+        self._btn_update_detector = QPushButton("Update Detector")
+        self._btn_update_detector.setToolTip("Fine-tune the detector on all completed saved labels")
+        self._btn_update_detector.clicked.connect(self._update_detector_now)
+        dg.addWidget(self._btn_update_detector)
+
+        self._lbl_detector_status = QLabel("Detector: pretrained until updated")
+        self._lbl_detector_status.setWordWrap(True)
+        self._lbl_detector_status.setStyleSheet(
+            "QLabel { background: #f1f5f9; border: 1px solid #d8e0ea; "
+            "border-radius: 5px; padding: 6px; color: #475569; }"
+        )
+        dg.addWidget(self._lbl_detector_status)
+        layout.addWidget(detector_grp)
 
         # --- navigation group ---
         nav_grp = QGroupBox("Navigation")
@@ -588,6 +742,56 @@ class MainWindow(QMainWindow):
             self._settings.endGroup()
             self._settings.sync()
 
+    def _save_detector_settings(self, *args):
+        if not hasattr(self, "_detector_model"):
+            return
+        self._settings.setValue("detector/base_model", self._detector_base_model())
+        self._settings.setValue("detector/confidence", self._detector_conf.value())
+        self._settings.setValue("detector/epochs", self._detector_epochs.value())
+        self._settings.setValue("detector/auto_update", self._chk_detector_auto.isChecked())
+        self._settings.sync()
+
+    def _detector_base_model(self) -> str:
+        if not hasattr(self, "_detector_model"):
+            return "yolo11n.pt"
+        return str(self._detector_model.currentData() or self._detector_model.currentText())
+
+    def _detector_image_size(self) -> int:
+        return 640
+
+    def _set_detector_status(self, text: str, color: str = "#475569"):
+        if not hasattr(self, "_lbl_detector_status"):
+            return
+        self._lbl_detector_status.setText(text)
+        self._lbl_detector_status.setStyleSheet(
+            "QLabel { background: #f1f5f9; border: 1px solid #d8e0ea; "
+            f"border-radius: 5px; padding: 6px; color: {color}; }}"
+        )
+
+    def _set_detector_controls_enabled(self):
+        if not hasattr(self, "_btn_suggest_detections"):
+            return
+        has_dataset = bool(self._clip_path and self._frame_paths)
+        busy = self._detector_prediction or self._detector_training
+        self._btn_suggest_detections.setEnabled(has_dataset and not busy)
+        self._btn_update_detector.setEnabled(has_dataset and not self._detector_training)
+        self._btn_accept_detections.setEnabled(bool(self._suggested_detection_boxes) and not busy)
+        self._btn_clear_detections.setEnabled(bool(self._suggested_detection_boxes))
+
+    def _refresh_detector_status(self):
+        if not hasattr(self, "_lbl_detector_status"):
+            return
+        if not self._clip_path:
+            self._set_detector_status("Detector: open a dataset to begin")
+            self._set_detector_controls_enabled()
+            return
+        model_path = trained_model_path(self._clip_path)
+        if model_path.exists():
+            self._set_detector_status(f"Detector: trained model ready ({model_path.name})", "#166534")
+        else:
+            self._set_detector_status("Detector: pretrained until updated")
+        self._set_detector_controls_enabled()
+
     def _shortcut_callbacks(self):
         return {
             "prev_frame": self._prev_frame,
@@ -597,6 +801,7 @@ class MainWindow(QMainWindow):
             "fit_view": self._fit_view_requested,
             "draw_box": self._toggle_draw_box_shortcut,
             "delete_box": self._delete_selected_box,
+            "select_all": self._select_all_boxes,
             "copy": self._copy_selected_box,
             "paste": self._paste_copied_box,
             "undo": self._undo_current_frame,
@@ -681,7 +886,8 @@ class MainWindow(QMainWindow):
         self._completed.clear()
         self._dirty_frames.clear()
         self._undo_stack.clear()
-        self._copied_box = None
+        self._copied_boxes = []
+        self._suggested_detection_boxes = []
         self._first_load = True
 
         # Detect previously completed frames
@@ -704,6 +910,7 @@ class MainWindow(QMainWindow):
         self._fit_main_window_to_screen()
         self._goto_frame(first_unlabelled)
         self._update_save_state()
+        self._refresh_detector_status()
         QTimer.singleShot(0, self._fit_current_frame_after_layout)
         QTimer.singleShot(120, self._fit_current_frame_after_layout)
         self._status.showMessage(
@@ -1086,6 +1293,193 @@ class MainWindow(QMainWindow):
     def _copy_boxes(self, boxes: List[Box]) -> List[Box]:
         return [self._copy_box(box) for box in boxes]
 
+    # ------------------------------------------------------------------ detector assist
+
+    def _suggest_detections_current_frame(self):
+        if not self._clip_path or not self._frame_paths or self._detector_prediction:
+            return
+        self._clear_suggested_detections(show_status=False)
+        self._detector_prediction = True
+        self._set_detector_controls_enabled()
+        self._set_detector_status("Detector: running on current frame...", "#1d4ed8")
+        self._status.showMessage("Running detector suggestions for this frame.", 3000)
+
+        thread = QThread(self)
+        worker = _DetectorPredictWorker(
+            self._current_index,
+            self._frame_paths[self._current_index],
+            self._clip_path,
+            self._detector_base_model(),
+            self._detector_conf.value(),
+            self._detector_image_size(),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_detector_suggestions_ready)
+        worker.failed.connect(self._on_detector_suggestions_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_detector_prediction_finished)
+        self._detector_predict_thread = thread
+        self._detector_predict_worker = worker
+        thread.start()
+
+    def _on_detector_suggestions_ready(self, index: int, boxes: List[Box], source: str, device: str):
+        if index != self._current_index:
+            self._status.showMessage(
+                f"Detector suggestions for frame {index + 1} were discarded after frame change.",
+                4000,
+            )
+            return
+        self._snap_boxes_for_index(index, boxes)
+        self._suggested_detection_boxes = self._copy_boxes(boxes)
+        self._set_detector_controls_enabled()
+        if not boxes:
+            self._canvas.clear_reference_boxes()
+            self._set_detector_status(f"Detector: no boxes at conf {self._detector_conf.value():.2f}", "#9a3412")
+            self._status.showMessage("Detector found no boxes on this frame.", 4000)
+            return
+        self._canvas.show_reference_boxes(self._suggested_detection_boxes, "suggested")
+        self._canvas.set_overlay_notice(f"Detector suggestions: {len(boxes)}", notice_id="detector")
+        self._set_detector_status(f"Detector: {len(boxes)} suggestion(s) from {source} on {device}", "#166534")
+        self._status.showMessage(
+            f"Detector suggested {len(boxes)} box(es). Review, then Accept New or Clear.",
+            5000,
+        )
+
+    def _on_detector_suggestions_failed(self, index: int, message: str):
+        self._suggested_detection_boxes = []
+        self._canvas.clear_reference_boxes()
+        self._set_detector_status("Detector: suggestion failed", "#b91c1c")
+        QMessageBox.warning(self, "Detector Suggestion Failed", message)
+
+    def _on_detector_prediction_finished(self):
+        self._detector_prediction = False
+        self._detector_predict_thread = None
+        self._detector_predict_worker = None
+        self._set_detector_controls_enabled()
+
+    def _clear_suggested_detections(self, show_status: bool = True):
+        self._suggested_detection_boxes = []
+        self._canvas.clear_reference_boxes()
+        self._set_detector_controls_enabled()
+        self._refresh_detector_status()
+        if show_status:
+            self._status.showMessage("Detector suggestions cleared.", 3000)
+
+    def _accept_suggested_detections(self):
+        if not self._suggested_detection_boxes:
+            self._status.showMessage("No detector suggestions to accept.", 3000)
+            return
+        current_boxes = self._get_boxes(self._current_index)
+        accepted: List[Box] = []
+        skipped = 0
+        for candidate in self._copy_boxes(self._suggested_detection_boxes):
+            candidate.identity = -1
+            self._snap_box_for_index(self._current_index, candidate)
+            if any(self._box_iou(candidate, existing) >= 0.55 for existing in current_boxes + accepted):
+                skipped += 1
+                continue
+            accepted.append(candidate)
+
+        if not accepted:
+            self._status.showMessage("All detector suggestions overlap existing boxes.", 4000)
+            return
+
+        self._push_undo()
+        current_boxes.extend(accepted)
+        self._mark_dirty(self._current_index)
+        self._suggested_detection_boxes = []
+        self._canvas.clear_reference_boxes()
+        self._goto_frame(self._current_index)
+        if skipped:
+            self._status.showMessage(
+                f"Accepted {len(accepted)} new detector box(es); skipped {skipped} overlapping suggestion(s).",
+                5000,
+            )
+        else:
+            self._status.showMessage(f"Accepted {len(accepted)} detector box(es).", 4000)
+
+    def _completed_indices_for_detector(self) -> List[int]:
+        return sorted(idx for idx, done in self._completed.items() if done)
+
+    def _queue_detector_training(self):
+        if not hasattr(self, "_chk_detector_auto") or not self._chk_detector_auto.isChecked():
+            return
+        if self._detector_training:
+            self._detector_train_queued = True
+            self._set_detector_status("Detector: update queued after current training", "#1d4ed8")
+            return
+        self._detector_train_queued = True
+        self._set_detector_status("Detector: update queued from completed labels", "#1d4ed8")
+        self._detector_auto_timer.start(1800)
+
+    def _update_detector_now(self):
+        self._detector_train_queued = True
+        self._start_detector_training()
+
+    def _start_detector_training(self):
+        if not self._clip_path or not self._frame_paths:
+            return
+        if self._detector_training:
+            self._detector_train_queued = True
+            return
+        completed_indices = self._completed_indices_for_detector()
+        if not completed_indices:
+            self._detector_train_queued = False
+            self._set_detector_status("Detector: no completed labels to train from", "#9a3412")
+            self._status.showMessage("Complete and save at least one labelled frame before updating the detector.", 5000)
+            return
+
+        self._detector_train_queued = False
+        self._detector_training = True
+        self._set_detector_controls_enabled()
+        self._set_detector_status(f"Detector: training on {len(completed_indices)} completed frame(s)...", "#1d4ed8")
+        self._status.showMessage("Detector training started in the background.", 4000)
+
+        thread = QThread(self)
+        worker = _DetectorTrainWorker(
+            self._clip_path,
+            self._frame_paths,
+            completed_indices,
+            self._detector_base_model(),
+            self._detector_epochs.value(),
+            self._detector_image_size(),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_detector_training_finished)
+        worker.failed.connect(self._on_detector_training_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_detector_training_thread_finished)
+        self._detector_train_thread = thread
+        self._detector_train_worker = worker
+        thread.start()
+
+    def _on_detector_training_finished(self, result):
+        self._set_detector_status(
+            f"Detector: updated on {result.frame_count} frame(s), {result.box_count} box(es) using {result.device}",
+            "#166534",
+        )
+        self._status.showMessage("Detector update finished. New suggestions will use the trained model.", 5000)
+
+    def _on_detector_training_failed(self, message: str):
+        self._set_detector_status("Detector: update failed", "#b91c1c")
+        QMessageBox.warning(self, "Detector Update Failed", message)
+
+    def _on_detector_training_thread_finished(self):
+        self._detector_training = False
+        self._detector_train_thread = None
+        self._detector_train_worker = None
+        self._set_detector_controls_enabled()
+        if self._detector_train_queued:
+            self._detector_auto_timer.start(1200)
+
     def _push_undo(self, index: Optional[int] = None):
         if not self._frame_paths:
             return
@@ -1137,6 +1531,7 @@ class MainWindow(QMainWindow):
         boxes = self._get_boxes(index)
         keep_zoom = not self._first_load
         self._canvas.load_frame(pix, boxes, keep_zoom=keep_zoom)
+        self._suggested_detection_boxes = []
         self._canvas.clear_reference_boxes()
         self._canvas.clear_warning_notices()
         self._canvas.set_current_boxes_visible(True)
@@ -1150,6 +1545,7 @@ class MainWindow(QMainWindow):
         self._lbl_frame.setText(f"Frame: {index + 1} / {n}{dirty}")
         self._update_save_state()
         self._update_id_summary()
+        self._set_detector_controls_enabled()
 
         done = self._completed.get(index, False)
         self._btn_complete.setChecked(done)
@@ -1169,6 +1565,8 @@ class MainWindow(QMainWindow):
         if self._canvas.is_interacting():
             self._status.showMessage("Release the mouse before showing frame overlays.")
             return
+        if self._suggested_detection_boxes:
+            self._clear_suggested_detections(show_status=False)
         if key == Qt.Key_Q:
             target = self._current_index - 1
             label = "prev"
@@ -1246,6 +1644,18 @@ class MainWindow(QMainWindow):
         self._btn_delete_box.setEnabled(False)
         self._id_input.clear()
         self._lbl_box_info.setText("No box selected")
+
+    def _on_multiple_boxes_selected(self, count: int):
+        self._clear_pending_id_state()
+        self._selected_box = None
+        self._canvas.clear_warning_notices()
+        self._id_input.setEnabled(False)
+        self._btn_assign.setEnabled(False)
+        self._update_next_id_button()
+        self._btn_remove_id.setEnabled(count > 0)
+        self._btn_delete_box.setEnabled(count > 0)
+        self._id_input.clear()
+        self._lbl_box_info.setText(f"{count} boxes selected")
 
     def _assign_identity(self):
         if self._selected_box is None:
@@ -1330,6 +1740,9 @@ class MainWindow(QMainWindow):
         self._pending_id_confirm = None
         self._canvas.clear_highlight()
         if self._active_overlay_key is None:
+            if self._suggested_detection_boxes:
+                self._suggested_detection_boxes = []
+                self._set_detector_controls_enabled()
             self._canvas.clear_reference_boxes()
 
     def _show_identity_trajectory_partial(self, identity: int):
@@ -1346,56 +1759,112 @@ class MainWindow(QMainWindow):
             self._canvas.show_trajectory(trajectory, identity)
 
     def _remove_identity(self):
-        if self._selected_box is None:
+        selected_boxes = self._canvas.get_selected_boxes()
+        if not selected_boxes and self._selected_box is not None:
+            selected_boxes = [self._selected_box]
+        if not selected_boxes:
+            return
+        boxes_to_clear = [box for box in selected_boxes if box.identity >= 0]
+        if not boxes_to_clear:
+            self._status.showMessage("Selected boxes already have no identity.", 3000)
             return
         self._push_undo()
-        self._selected_box.identity = -1
+        for box in boxes_to_clear:
+            box.identity = -1
         self._id_input.clear()
         self._clear_pending_id_state()
         self._canvas.refresh_boxes()
         self._canvas.clear_warning_notices()
-        self._lbl_box_info.setText("Unassigned box")
+        if len(selected_boxes) == 1:
+            self._lbl_box_info.setText("Unassigned box")
+        else:
+            self._selected_box = None
+            self._lbl_box_info.setText(f"{len(selected_boxes)} boxes selected")
         self._mark_dirty(self._current_index)
         self._update_id_summary()
-        self._status.showMessage("Identity cleared.", 3000)
+        cleared_count = len(boxes_to_clear)
+        self._status.showMessage(
+            "Identity cleared." if cleared_count == 1 else f"Cleared identities from {cleared_count} boxes.",
+            3000,
+        )
 
     def _delete_selected_box(self):
-        if self._selected_box is None:
+        selected_boxes = self._canvas.get_selected_boxes()
+        if not selected_boxes and self._selected_box is not None:
+            selected_boxes = [self._selected_box]
+        if not selected_boxes:
             return
         boxes = self._get_boxes(self._current_index)
-        if self._selected_box in boxes:
+        selected_ids = {id(box) for box in selected_boxes}
+        kept_boxes = [box for box in boxes if id(box) not in selected_ids]
+        deleted_count = len(boxes) - len(kept_boxes)
+        if deleted_count:
             self._push_undo()
-            boxes.remove(self._selected_box)
+            boxes[:] = kept_boxes
             self._selected_box = None
             self._mark_dirty(self._current_index)
             self._canvas.clear_warning_notices()
             self._goto_frame(self._current_index)
-            self._status.showMessage("Box deleted.", 3000)
+            self._status.showMessage(
+                "Box deleted." if deleted_count == 1 else f"{deleted_count} boxes deleted.",
+                3000,
+            )
+
+    def _select_all_boxes(self):
+        if not self._frame_paths:
+            return
+        selected_boxes = self._canvas.select_all_boxes()
+        count = len(selected_boxes)
+        if count == 0:
+            self._on_box_deselected()
+            self._status.showMessage("No boxes in this frame.", 3000)
+            return
+        self._on_multiple_boxes_selected(count)
+        self._status.showMessage(f"Selected {count} boxes.", 3000)
 
     def _copy_selected_box(self):
-        if self._selected_box is None:
-            self._status.showMessage("No selected box to copy.", 3000)
+        selected_boxes = self._canvas.get_selected_boxes()
+        if not selected_boxes and self._selected_box is not None:
+            selected_boxes = [self._selected_box]
+        if not selected_boxes:
+            self._status.showMessage("No selected boxes to copy.", 3000)
             return
-        self._copied_box = self._copy_box(self._selected_box)
+        self._copied_boxes = self._copy_boxes(selected_boxes)
         self._canvas.clear_warning_notices()
-        self._status.showMessage("Box copied.", 3000)
+        count = len(self._copied_boxes)
+        self._status.showMessage(
+            "Box copied." if count == 1 else f"{count} boxes copied.",
+            3000,
+        )
 
     def _paste_copied_box(self):
-        if self._copied_box is None:
-            self._status.showMessage("No copied box to paste.", 3000)
+        if not self._copied_boxes:
+            self._status.showMessage("No copied boxes to paste.", 3000)
             return
-        box = self._copy_box(self._copied_box)
-        self._snap_box_for_index(self._current_index, box)
-        if box.identity >= 0 and self._identity_used_in_current_frame(box.identity, box):
-            box.identity = -1
-            self._status.showMessage("Box pasted without ID — that ID is already used in this frame.", 4000)
-        else:
-            self._status.showMessage("Box pasted.", 3000)
+        existing_boxes = self._get_boxes(self._current_index)
+        used_ids = {box.identity for box in existing_boxes if box.identity >= 0}
+        pasted_boxes = self._copy_boxes(self._copied_boxes)
+        cleared_ids = 0
+        for box in pasted_boxes:
+            self._snap_box_for_index(self._current_index, box)
+            if box.identity >= 0 and box.identity in used_ids:
+                box.identity = -1
+                cleared_ids += 1
+            elif box.identity >= 0:
+                used_ids.add(box.identity)
         self._push_undo()
-        self._get_boxes(self._current_index).append(box)
+        existing_boxes.extend(pasted_boxes)
         self._mark_dirty(self._current_index)
         self._canvas.clear_warning_notices()
         self._goto_frame(self._current_index)
+        count = len(pasted_boxes)
+        if cleared_ids:
+            self._status.showMessage(
+                f"Pasted {count} boxes; {cleared_ids} IDs cleared because they were already used here.",
+                5000,
+            )
+        else:
+            self._status.showMessage("Box pasted." if count == 1 else f"{count} boxes pasted.", 3000)
 
     def _toggle_draw_box(self, enabled: bool):
         self._canvas.set_draw_mode(enabled)
@@ -1475,6 +1944,10 @@ class MainWindow(QMainWindow):
         self._canvas.show_trajectory(trajectory, identity)
 
     def _mark_dirty(self, index: int):
+        if index == self._current_index and self._suggested_detection_boxes:
+            self._suggested_detection_boxes = []
+            self._canvas.clear_reference_boxes()
+            self._set_detector_controls_enabled()
         self._dirty_frames.add(index)
         if self._completed.get(index, False):
             self._completed[index] = False
@@ -1589,6 +2062,7 @@ class MainWindow(QMainWindow):
         self._update_save_state()
         if sanity["passed"]:
             self._status.showMessage(f"Saved and completed frame {idx + 1}: {gt_path.name}", 3000)
+            self._queue_detector_training()
         else:
             self._status.showMessage(
                 f"Saved frame {idx + 1}, but not completed: {'; '.join(sanity['messages'])}",
@@ -1615,6 +2089,14 @@ class MainWindow(QMainWindow):
             self._goto_frame(frame_num - 1)
 
     def closeEvent(self, event):
+        if self._detector_training or self._detector_prediction:
+            QMessageBox.information(
+                self,
+                "Detector Busy",
+                "A detector job is still running. Please wait for it to finish before closing the app.",
+            )
+            event.ignore()
+            return
         if self._handle_dirty_before_context_change("closing"):
             event.accept()
         else:

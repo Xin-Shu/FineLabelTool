@@ -379,6 +379,18 @@ class ImageCanvas(QGraphicsView):
         self._scene.clearSelection()
         self.box_deselected.emit()
 
+    def select_all_boxes(self) -> List[Box]:
+        self.stop_flash()
+        if not self._box_items:
+            self.box_deselected.emit()
+            return []
+        for item in self._box_items:
+            item.setSelected(True)
+        return [item.box for item in self._box_items]
+
+    def get_selected_boxes(self) -> List[Box]:
+        return [item.box for item in self._box_items if item.isSelected()]
+
     def highlight_box(self, box: Box):
         self.stop_flash()
         self.clear_highlight()

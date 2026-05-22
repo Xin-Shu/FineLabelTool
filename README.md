@@ -54,6 +54,15 @@ Multi-object tracking annotation needs more than drawing boxes. It also needs **
 
 **About OmniSORT.** Label & Track uses a lightweight, interactive adaptation of OmniSORT for annotation-time ID suggestion. Instead of running a full tracker across the entire sequence, it matches the current frame's unassigned boxes against identities from the previous completed frame and proposes one-to-one assignments to speed up manual labeling. The original OmniSORT tracker is also publicly available at [Xin-Shu/OmniSORT](https://github.com/Xin-Shu/OmniSORT).
 
+### Detection Assist
+- **Suggest Detections** runs a lightweight YOLO detector on the current frame without changing labels
+- **Accept New** converts non-overlapping detector suggestions into editable, unassigned boxes
+- **Update Detector** fine-tunes the detector from completed saved labels
+- **Auto-update after completed save** can retrain the detector in the background as annotation grows
+- **GPU acceleration** is used automatically when PyTorch detects CUDA or Apple MPS; CPU is used otherwise
+
+Detector assist is optional and uses [Ultralytics YOLO](https://docs.ultralytics.com/). For open-source use, review the Ultralytics AGPL-3.0 licensing terms and keep the repository license compatible with the detector dependency.
+
 ### Navigation & Overlays
 - **Frame timeline** with async thumbnail loading and completion indicators
 - **Jump to any frame** directly by number (Ctrl+G)
@@ -91,6 +100,9 @@ source .venv/bin/activate        # macOS / Linux
 
 # 3. Install dependencies
 pip install -r requirements.txt
+
+# Optional: enable Detection Assist
+pip install -r requirements-detector.txt
 ```
 
 ---
@@ -182,8 +194,10 @@ A typical session looks like this:
 4. **Find unfinished work** — use *Direct* beside *Unassigned* to jump to unlabelled boxes, or beside *Disappeared* to inspect where a missing ID was last seen in the previous frame.
 5. **Add missing boxes** — press `B` (or click *Draw Box*), drag a rectangle on the canvas, then assign an ID.
 6. **Use ID suggestions** — click *Suggest IDs* in the *ID Suggestions* panel to auto-propagate IDs from the previous completed frame using the app's interactive OmniSORT-based matcher.
-7. **Compare with adjacent frames** — hold `Q` or `W` to ghost the previous or next frame's boxes over the current view. This helps verify spatial consistency without navigating away.
-8. **Save or complete** — press `Ctrl+S` to save. If the frame passes sanity checks, it is automatically marked completed. Pressing `Ctrl+Enter` also saves first, then completes only when sanity checks pass.
+7. **Use detector assist** — click *Suggest Detections* to preview detector boxes. Click *Accept New* to add only suggestions that do not overlap existing boxes.
+8. **Improve the detector** — leave *Auto-update after completed save* enabled or click *Update Detector* to fine-tune YOLO on all completed saved labels.
+9. **Compare with adjacent frames** — hold `Q` or `W` to ghost the previous or next frame's boxes over the current view. This helps verify spatial consistency without navigating away.
+10. **Save or complete** — press `Ctrl+S` to save. If the frame passes sanity checks, it is automatically marked completed. Pressing `Ctrl+Enter` also saves first, then completes only when sanity checks pass.
 
 ---
 
@@ -199,9 +213,11 @@ FineLabelTool/
 │   ├── label_io.py        # Label file reading and writing
 │   ├── colors.py          # Per-identity colour palette
 │   └── algo/
+│       ├── detector.py    # Optional YOLO detector suggestion and fine-tuning
 │       └── omnisort.py    # GIoU + omni-distance ID suggestion
 ├── data/                  # Datasets go here
 ├── requirements.txt
+├── requirements-detector.txt
 ├── run.sh                 # Linux / macOS launcher
 └── run.bat                # Windows launcher
 ```

@@ -19,7 +19,7 @@ REFERENCE_BOX_STROKE_PX = 1.25
 HIGHLIGHT_STROKE_PX = 2.6
 HANDLE_STROKE_PX = 0.8
 DRAW_BOX_STROKE_PX = 1.45
-TRAJECTORY_STROKE_PX = 1.25
+TRAJECTORY_STROKE_PX = 1.8
 _H_TL, _H_TM, _H_TR = 0, 1, 2
 _H_ML, _H_MR        = 3, 4
 _H_BL, _H_BM, _H_BR = 5, 6, 7
@@ -595,6 +595,75 @@ class ImageCanvas(QGraphicsView):
             self._scene.addItem(item)
             self._reference_items.append(item)
 
+    def _box_center_point(self, box: Box) -> QPointF:
+        return QPointF(box.x_center * self._img_w, box.y_center * self._img_h)
+
+    def _crosses_horizontal_boundary(self, prev_box: Box, next_box: Box) -> bool:
+        if self._img_w <= 0:
+            return False
+        edge_band = max(8.0, self._img_w * 0.08)
+        prev_x = prev_box.x_center * self._img_w
+        next_x = next_box.x_center * self._img_w
+        if abs(next_x - prev_x) <= self._img_w * 0.45:
+            return False
+
+        prev_left = (prev_box.x_center - prev_box.width / 2.0) * self._img_w
+        prev_right = (prev_box.x_center + prev_box.width / 2.0) * self._img_w
+        next_left = (next_box.x_center - next_box.width / 2.0) * self._img_w
+        next_right = (next_box.x_center + next_box.width / 2.0) * self._img_w
+
+        prev_near_left = prev_left <= edge_band or prev_x <= edge_band
+        prev_near_right = prev_right >= self._img_w - edge_band or prev_x >= self._img_w - edge_band
+        next_near_left = next_left <= edge_band or next_x <= edge_band
+        next_near_right = next_right >= self._img_w - edge_band or next_x >= self._img_w - edge_band
+        return (prev_near_left and next_near_right) or (prev_near_right and next_near_left)
+
+    def _add_trajectory_line(self, path: QPainterPath, color: QColor):
+        line = QGraphicsPathItem(path)
+        pen = QPen(color)
+        pen.setWidthF(TRAJECTORY_STROKE_PX)
+        pen.setStyle(Qt.DotLine)
+        pen.setCosmetic(True)
+        line.setPen(pen)
+        line.setZValue(1.8)
+        self._scene.addItem(line)
+        self._trajectory_items.append(line)
+
+    def _add_trajectory_box(self, box: Box, *, highlighted: bool = False):
+        item = BoxItem(
+            box,
+            self._img_w,
+            self._img_h,
+            reference_label="track",
+        )
+        item.highlighted = highlighted
+        self._scene.addItem(item)
+        self._reference_items.append(item)
+
+    def _draw_trajectory_lines(self, boxes: List[Box], color: QColor) -> bool:
+        if len(boxes) < 2:
+            return False
+        path = QPainterPath(self._box_center_point(boxes[0]))
+        point_count = 1
+        drew_line = False
+        prev_box = boxes[0]
+        for box in boxes[1:]:
+            point = self._box_center_point(box)
+            if self._crosses_horizontal_boundary(prev_box, box):
+                if point_count >= 2:
+                    self._add_trajectory_line(path, color)
+                    drew_line = True
+                path = QPainterPath(point)
+                point_count = 1
+            else:
+                path.lineTo(point)
+                point_count += 1
+            prev_box = box
+        if point_count >= 2:
+            self._add_trajectory_line(path, color)
+            drew_line = True
+        return drew_line
+
     def show_trajectory(self, boxes: List[Box], identity: int):
         self.clear_reference_boxes()
         if not boxes:
@@ -603,32 +672,26 @@ class ImageCanvas(QGraphicsView):
         self._panning = False
         snap_boxes_to_pixel_grid(boxes, self._img_w, self._img_h)
         color = get_color(identity)
-        centers = []
         for box in boxes:
-            item = BoxItem(
-                box,
-                self._img_w,
-                self._img_h,
-                reference_label="track",
-            )
-            self._scene.addItem(item)
-            self._reference_items.append(item)
-            centers.append(QPointF(box.x_center * self._img_w, box.y_center * self._img_h))
+            self._add_trajectory_box(box)
 
-        if len(centers) >= 2:
-            path = QPainterPath(centers[0])
-            for point in centers[1:]:
-                path.lineTo(point)
-            line = QGraphicsPathItem(path)
-            pen = QPen(color)
-            pen.setWidthF(TRAJECTORY_STROKE_PX)
-            pen.setStyle(Qt.DotLine)
-            pen.setCosmetic(True)
-            line.setPen(pen)
-            line.setZValue(2.5)
-            self._scene.addItem(line)
-            self._trajectory_items.append(line)
+        self._draw_trajectory_lines(boxes, color)
         self.set_overlay_notice(f"Trajectory: ID {identity}", notice_id="trajectory")
+
+    def show_trajectories(self, trajectories: Dict[int, List[Box]]):
+        self.clear_reference_boxes()
+        non_empty = {identity: boxes for identity, boxes in trajectories.items() if boxes}
+        if not non_empty:
+            return
+        self._overlay_active = True
+        self._panning = False
+        for identity, boxes in sorted(non_empty.items()):
+            snap_boxes_to_pixel_grid(boxes, self._img_w, self._img_h)
+            color = get_color(identity)
+            drew_line = self._draw_trajectory_lines(boxes, color)
+            for box in boxes:
+                self._add_trajectory_box(box, highlighted=not drew_line and box is boxes[-1])
+        self.set_overlay_notice(f"Trajectories: {len(non_empty)} IDs", notice_id="trajectory")
 
     def _notice_style(self, kind: str) -> str:
         if kind == "warning":

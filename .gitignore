@@ -2,6 +2,12 @@
 data/
 .claude/
 
+# Detector model weights and generated training caches
+*.pt
+*.onnx
+*.engine
+.detector/
+
 # Local launcher overrides
 run.bat
 run.sh

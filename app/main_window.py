@@ -241,7 +241,7 @@ class HotkeyDialog(QDialog):
 
 
 class _DetectorPredictWorker(QObject):
-    finished = pyqtSignal(int, object, str, str)
+    finished = pyqtSignal(int, object, str, str, int)
     failed = pyqtSignal(int, str)
 
     def __init__(self, index: int, image_path: Path, clip_path: Path, base_model: str, confidence: float, image_size: int):
@@ -262,7 +262,7 @@ class _DetectorPredictWorker(QObject):
                 confidence=self.confidence,
                 image_size=self.image_size,
             )
-            self.finished.emit(self.index, result.boxes, result.source, result.device)
+            self.finished.emit(self.index, result.boxes, result.source, result.device, result.tile_count)
         except DetectorError as exc:
             self.failed.emit(self.index, str(exc))
         except Exception as exc:
@@ -373,8 +373,8 @@ class MainWindow(QMainWindow):
                 border: 1px solid #c8d0d9;
                 border-radius: 6px;
                 font-weight: 600;
-                margin-top: 10px;
-                padding: 8px 8px 8px 8px;
+                margin-top: 8px;
+                padding: 6px 7px 6px 7px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -385,8 +385,8 @@ class MainWindow(QMainWindow):
                 background: #ffffff;
                 border: 1px solid #b8c2cc;
                 border-radius: 4px;
-                min-height: 26px;
-                padding: 4px 8px;
+                min-height: 22px;
+                padding: 2px 7px;
             }
             QPushButton:hover {
                 background: #edf5ff;
@@ -400,8 +400,12 @@ class MainWindow(QMainWindow):
                 background: #ffffff;
                 border: 1px solid #aab5c0;
                 border-radius: 4px;
-                min-height: 24px;
+                min-height: 22px;
                 padding: 2px 5px;
+            }
+            QComboBox, QSpinBox, QDoubleSpinBox {
+                min-height: 22px;
+                padding: 1px 5px;
             }
             QLineEdit:focus {
                 border-color: #3178c6;
@@ -462,8 +466,8 @@ class MainWindow(QMainWindow):
         content.setMinimumWidth(240)
         content.setMaximumWidth(330)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(8, 0, 4, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(7, 0, 4, 0)
+        layout.setSpacing(4)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -478,6 +482,8 @@ class MainWindow(QMainWindow):
         # --- box group ---
         box_grp = QGroupBox("Selected Box")
         bg = QVBoxLayout(box_grp)
+        bg.setContentsMargins(7, 9, 7, 7)
+        bg.setSpacing(4)
 
         self._lbl_box_info = QLabel("No box selected")
         self._lbl_box_info.setWordWrap(True)
@@ -518,19 +524,13 @@ class MainWindow(QMainWindow):
         self._btn_delete_box.clicked.connect(self._delete_selected_box)
         bg.addWidget(self._btn_delete_box)
 
-        self._chk_lock_position = QCheckBox("Lock box position")
-        self._chk_lock_position.stateChanged.connect(self._toggle_box_geometry_locks)
-        bg.addWidget(self._chk_lock_position)
-
-        self._chk_lock_size = QCheckBox("Lock box size")
-        self._chk_lock_size.stateChanged.connect(self._toggle_box_geometry_locks)
-        bg.addWidget(self._chk_lock_size)
-
         layout.addWidget(box_grp)
 
         # --- frame group ---
         frm_grp = QGroupBox("Frame")
         fg = QVBoxLayout(frm_grp)
+        fg.setContentsMargins(7, 9, 7, 7)
+        fg.setSpacing(4)
 
         self._btn_complete = QPushButton("Mark Completed")
         self._btn_complete.setCheckable(True)
@@ -554,6 +554,8 @@ class MainWindow(QMainWindow):
         # --- detector assist group ---
         detector_grp = QGroupBox("Detection Assist")
         dg = QVBoxLayout(detector_grp)
+        dg.setContentsMargins(7, 9, 7, 7)
+        dg.setSpacing(4)
 
         detector_model_row = QHBoxLayout()
         detector_model_row.addWidget(QLabel("Model:"))
@@ -587,7 +589,7 @@ class MainWindow(QMainWindow):
         dg.addLayout(detector_opts_row)
 
         self._btn_suggest_detections = QPushButton("Suggest Detections")
-        self._btn_suggest_detections.setToolTip("Run the detector on the current frame without changing labels")
+        self._btn_suggest_detections.setToolTip("Run tiled detector inference on the current frame without changing labels")
         self._btn_suggest_detections.clicked.connect(self._suggest_detections_current_frame)
         dg.addWidget(self._btn_suggest_detections)
 
@@ -611,11 +613,11 @@ class MainWindow(QMainWindow):
         dg.addWidget(self._chk_detector_auto)
 
         self._btn_update_detector = QPushButton("Update Detector")
-        self._btn_update_detector.setToolTip("Fine-tune the detector on all completed saved labels")
+        self._btn_update_detector.setToolTip("Fine-tune the tiled detector on all completed saved labels")
         self._btn_update_detector.clicked.connect(self._update_detector_now)
         dg.addWidget(self._btn_update_detector)
 
-        self._lbl_detector_status = QLabel("Detector: pretrained until updated")
+        self._lbl_detector_status = QLabel("Detector: tiled pretrained model until updated")
         self._lbl_detector_status.setWordWrap(True)
         self._lbl_detector_status.setStyleSheet(
             "QLabel { background: #f1f5f9; border: 1px solid #d8e0ea; "
@@ -627,17 +629,8 @@ class MainWindow(QMainWindow):
         # --- navigation group ---
         nav_grp = QGroupBox("Navigation")
         ng = QVBoxLayout(nav_grp)
-
-        row2 = QHBoxLayout()
-        btn_prev = QPushButton("Prev")
-        btn_prev.setToolTip("Go to previous frame (← arrow key)")
-        btn_prev.clicked.connect(self._prev_frame)
-        btn_next = QPushButton("Next")
-        btn_next.setToolTip("Go to next frame (→ arrow key)")
-        btn_next.clicked.connect(self._next_frame)
-        row2.addWidget(btn_prev)
-        row2.addWidget(btn_next)
-        ng.addLayout(row2)
+        ng.setContentsMargins(7, 9, 7, 7)
+        ng.setSpacing(4)
 
         btn_fit = QPushButton("Fit View  (F)")
         btn_fit.setToolTip("Fit the image to the viewport")
@@ -659,6 +652,8 @@ class MainWindow(QMainWindow):
         # --- tracker group ---
         tracker_grp = QGroupBox("ID Suggestions")
         tg = QVBoxLayout(tracker_grp)
+        tg.setContentsMargins(7, 9, 7, 7)
+        tg.setSpacing(4)
         self._tracker_algo = QComboBox()
         self._tracker_algo.addItems(["OmniSORT"])
         tg.addWidget(self._tracker_algo)
@@ -669,6 +664,8 @@ class MainWindow(QMainWindow):
 
         summary_grp = QGroupBox("ID Summary (against prev)")
         sg = QVBoxLayout(summary_grp)
+        sg.setContentsMargins(7, 9, 7, 7)
+        sg.setSpacing(4)
         unassigned_row = QHBoxLayout()
         self._lbl_unassigned_title = QLabel("<b>Unassigned</b>")
         self._lbl_unassigned_title.setTextFormat(Qt.RichText)
@@ -697,6 +694,12 @@ class MainWindow(QMainWindow):
         disappeared_row.addWidget(self._lbl_disappeared_value)
         disappeared_row.addWidget(self._btn_direct_disappeared)
         sg.addLayout(disappeared_row)
+        self._btn_show_trajectories = QPushButton("Show All Trajectories")
+        self._btn_show_trajectories.setCheckable(True)
+        self._btn_show_trajectories.setEnabled(False)
+        self._btn_show_trajectories.setToolTip("Overlay trajectories for every ID seen up to this frame")
+        self._btn_show_trajectories.clicked.connect(self._toggle_all_trajectories)
+        sg.addWidget(self._btn_show_trajectories)
         self._lbl_id_summary = QLabel("No dataset loaded.")
         self._lbl_id_summary.setTextFormat(Qt.RichText)
         self._lbl_id_summary.setWordWrap(True)
@@ -787,9 +790,9 @@ class MainWindow(QMainWindow):
             return
         model_path = trained_model_path(self._clip_path)
         if model_path.exists():
-            self._set_detector_status(f"Detector: trained model ready ({model_path.name})", "#166534")
+            self._set_detector_status(f"Detector: trained tiled model ready ({model_path.name})", "#166534")
         else:
-            self._set_detector_status("Detector: pretrained until updated")
+            self._set_detector_status("Detector: tiled pretrained model until updated")
         self._set_detector_controls_enabled()
 
     def _shortcut_callbacks(self):
@@ -964,6 +967,14 @@ class MainWindow(QMainWindow):
             return "None"
         return ", ".join(str(identity) for identity in values)
 
+    def _trajectory_ids_through_current(self) -> List[int]:
+        if not self._frame_paths:
+            return []
+        identities = set()
+        for idx in range(self._current_index + 1):
+            identities.update(self._ids_in_frame(self._get_boxes(idx)))
+        return sorted(identities)
+
     def _frame_sanity(self, index: int) -> Dict[str, object]:
         curr_boxes = self._get_boxes(index)
         curr_id_list = self._ids_in_frame(curr_boxes)
@@ -1090,6 +1101,7 @@ class MainWindow(QMainWindow):
             self._current_boxes_hidden_for_overlay = False
         self._active_overlay_key = None
         self._canvas.clear_reference_boxes()
+        self._set_trajectory_button_checked(False)
         self._canvas.clear_warning_notices()
         target = boxes[self._direct_unassigned_cursor % len(boxes)]
         self._direct_unassigned_cursor = (self._direct_unassigned_cursor + 1) % len(boxes)
@@ -1105,11 +1117,50 @@ class MainWindow(QMainWindow):
             self._canvas.set_current_boxes_visible(True)
             self._current_boxes_hidden_for_overlay = False
         self._active_overlay_key = None
+        self._set_trajectory_button_checked(False)
         self._canvas.clear_warning_notices()
         target = boxes[self._direct_disappeared_cursor % len(boxes)]
         self._direct_disappeared_cursor = (self._direct_disappeared_cursor + 1) % len(boxes)
         if self._canvas.focus_reference_box(target, label="prev", flashes=3):
             self._status.showMessage(f"Focused last location of disappeared ID {target.identity}.", 3000)
+
+    def _set_trajectory_button_checked(self, checked: bool):
+        if not hasattr(self, "_btn_show_trajectories"):
+            return
+        self._btn_show_trajectories.blockSignals(True)
+        self._btn_show_trajectories.setChecked(checked)
+        self._btn_show_trajectories.blockSignals(False)
+
+    def _toggle_all_trajectories(self, checked: bool):
+        if not self._frame_paths:
+            self._set_trajectory_button_checked(False)
+            return
+        if not checked:
+            self._canvas.clear_reference_boxes()
+            self._status.showMessage("Trajectory overlay hidden.", 3000)
+            return
+        if self._current_boxes_hidden_for_overlay:
+            self._canvas.set_current_boxes_visible(True)
+            self._current_boxes_hidden_for_overlay = False
+        self._active_overlay_key = None
+        self._suggested_detection_boxes = []
+        self._set_detector_controls_enabled()
+        trajectory_ids = self._trajectory_ids_through_current()
+        if not trajectory_ids:
+            self._set_trajectory_button_checked(False)
+            self._status.showMessage("No assigned IDs up to this frame.", 3000)
+            return
+        trajectories = {identity: [] for identity in trajectory_ids}
+        wanted = set(trajectory_ids)
+        for idx in range(self._current_index + 1):
+            seen_this_frame = set()
+            for box in self._get_boxes(idx):
+                if box.identity in wanted and box.identity not in seen_this_frame:
+                    trajectories[box.identity].append(self._copy_box(box))
+                    seen_this_frame.add(box.identity)
+        self._canvas.clear_warning_notices()
+        self._canvas.show_trajectories(trajectories)
+        self._status.showMessage(f"Showing trajectories for {len(trajectory_ids)} ID(s) seen up to this frame.", 4000)
 
     def _id_summary_html(self, rows: List[tuple]) -> str:
         rendered_rows = []
@@ -1166,12 +1217,16 @@ class MainWindow(QMainWindow):
             self._update_unassigned_direct(0, 0)
             self._update_disappeared_direct([])
             self._update_next_id_button()
+            if hasattr(self, "_btn_show_trajectories"):
+                self._btn_show_trajectories.setEnabled(False)
             return
         result = self._frame_sanity(self._current_index)
         curr_ids = result["curr_ids"]
         unassigned = result["unassigned"]
         total = result["total"]
         self._update_unassigned_direct(unassigned, total)
+        if hasattr(self, "_btn_show_trajectories"):
+            self._btn_show_trajectories.setEnabled(bool(self._trajectory_ids_through_current()))
         sanity = result["messages"]
         if self._current_index <= 0:
             sanity_text = (
@@ -1326,7 +1381,7 @@ class MainWindow(QMainWindow):
         self._detector_predict_worker = worker
         thread.start()
 
-    def _on_detector_suggestions_ready(self, index: int, boxes: List[Box], source: str, device: str):
+    def _on_detector_suggestions_ready(self, index: int, boxes: List[Box], source: str, device: str, tile_count: int):
         if index != self._current_index:
             self._status.showMessage(
                 f"Detector suggestions for frame {index + 1} were discarded after frame change.",
@@ -1338,12 +1393,17 @@ class MainWindow(QMainWindow):
         self._set_detector_controls_enabled()
         if not boxes:
             self._canvas.clear_reference_boxes()
+            self._set_trajectory_button_checked(False)
             self._set_detector_status(f"Detector: no boxes at conf {self._detector_conf.value():.2f}", "#9a3412")
             self._status.showMessage("Detector found no boxes on this frame.", 4000)
             return
+        self._set_trajectory_button_checked(False)
         self._canvas.show_reference_boxes(self._suggested_detection_boxes, "suggested")
         self._canvas.set_overlay_notice(f"Detector suggestions: {len(boxes)}", notice_id="detector")
-        self._set_detector_status(f"Detector: {len(boxes)} suggestion(s) from {source} on {device}", "#166534")
+        self._set_detector_status(
+            f"Detector: {len(boxes)} suggestion(s) from {source} on {device}, {tile_count} tile(s)",
+            "#166534",
+        )
         self._status.showMessage(
             f"Detector suggested {len(boxes)} box(es). Review, then Accept New or Clear.",
             5000,
@@ -1352,6 +1412,7 @@ class MainWindow(QMainWindow):
     def _on_detector_suggestions_failed(self, index: int, message: str):
         self._suggested_detection_boxes = []
         self._canvas.clear_reference_boxes()
+        self._set_trajectory_button_checked(False)
         self._set_detector_status("Detector: suggestion failed", "#b91c1c")
         QMessageBox.warning(self, "Detector Suggestion Failed", message)
 
@@ -1364,6 +1425,7 @@ class MainWindow(QMainWindow):
     def _clear_suggested_detections(self, show_status: bool = True):
         self._suggested_detection_boxes = []
         self._canvas.clear_reference_boxes()
+        self._set_trajectory_button_checked(False)
         self._set_detector_controls_enabled()
         self._refresh_detector_status()
         if show_status:
@@ -1462,8 +1524,15 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _on_detector_training_finished(self, result):
+        if not result.updated:
+            self._set_detector_status(
+                f"Detector: already current; {result.skipped_frame_count} completed frame(s) reused",
+                "#166534",
+            )
+            self._status.showMessage("Detector already includes the completed labels. No training needed.", 5000)
+            return
         self._set_detector_status(
-            f"Detector: updated on {result.frame_count} frame(s), {result.box_count} box(es) using {result.device}",
+            f"Detector: updated on {result.frame_count} new/changed frame(s), {result.tile_count} tile(s), {result.box_count} label(s) using {result.device}",
             "#166534",
         )
         self._status.showMessage("Detector update finished. New suggestions will use the trained model.", 5000)
@@ -1533,6 +1602,7 @@ class MainWindow(QMainWindow):
         self._canvas.load_frame(pix, boxes, keep_zoom=keep_zoom)
         self._suggested_detection_boxes = []
         self._canvas.clear_reference_boxes()
+        self._set_trajectory_button_checked(False)
         self._canvas.clear_warning_notices()
         self._canvas.set_current_boxes_visible(True)
         self._active_overlay_key = None
@@ -1567,6 +1637,7 @@ class MainWindow(QMainWindow):
             return
         if self._suggested_detection_boxes:
             self._clear_suggested_detections(show_status=False)
+        self._set_trajectory_button_checked(False)
         if key == Qt.Key_Q:
             target = self._current_index - 1
             label = "prev"
@@ -1584,6 +1655,7 @@ class MainWindow(QMainWindow):
 
         if not 0 <= target < len(self._frame_paths):
             self._canvas.clear_reference_boxes()
+            self._set_trajectory_button_checked(False)
             self._status.showMessage("No adjacent frame available for overlay.")
             return
 
@@ -1744,6 +1816,7 @@ class MainWindow(QMainWindow):
                 self._suggested_detection_boxes = []
                 self._set_detector_controls_enabled()
             self._canvas.clear_reference_boxes()
+            self._set_trajectory_button_checked(False)
 
     def _show_identity_trajectory_partial(self, identity: int):
         trajectory = []
@@ -1756,6 +1829,7 @@ class MainWindow(QMainWindow):
                 trajectory.append(match)
         if trajectory:
             self._active_overlay_key = None
+            self._set_trajectory_button_checked(False)
             self._canvas.show_trajectory(trajectory, identity)
 
     def _remove_identity(self):
@@ -1941,12 +2015,14 @@ class MainWindow(QMainWindow):
                 return
             trajectory.append(match)
         self._active_overlay_key = None
+        self._set_trajectory_button_checked(False)
         self._canvas.show_trajectory(trajectory, identity)
 
     def _mark_dirty(self, index: int):
         if index == self._current_index and self._suggested_detection_boxes:
             self._suggested_detection_boxes = []
             self._canvas.clear_reference_boxes()
+            self._set_trajectory_button_checked(False)
             self._set_detector_controls_enabled()
         self._dirty_frames.add(index)
         if self._completed.get(index, False):
@@ -1959,20 +2035,6 @@ class MainWindow(QMainWindow):
             f"Frame: {index + 1} / {len(self._frame_paths)} *"
         )
         self._update_save_state()
-
-    def _toggle_box_geometry_locks(self, state: int):
-        position_locked = self._chk_lock_position.isChecked()
-        size_locked = self._chk_lock_size.isChecked()
-        self._canvas.set_geometry_locks(position_locked, size_locked)
-        if position_locked and size_locked:
-            msg = "Box position and size locked."
-        elif position_locked:
-            msg = "Box position locked."
-        elif size_locked:
-            msg = "Box size locked."
-        else:
-            msg = "Box position and size unlocked."
-        self._status.showMessage(msg)
 
     def _suggest_ids_from_previous(self):
         idx = self._current_index

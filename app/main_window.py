@@ -2405,6 +2405,32 @@ class MainWindow(QMainWindow):
         if ok:
             self._goto_frame(frame_num - 1)
 
+    def _wait_for_thread_pool(self, pool: QThreadPool, wait_ms: int) -> bool:
+        try:
+            return bool(pool.waitForDone(max(0, int(wait_ms))))
+        except TypeError:
+            pool.waitForDone()
+            return True
+
+    def _shutdown_background_loaders(self):
+        self._set_task_message("Closing loaders...", active=True, color="#1d4ed8")
+        QApplication.processEvents()
+
+        self._frame_load_generation += 1
+        self._pending_frame_index = None
+        self._frame_loading_indexes.clear()
+        self._frame_pool.clear()
+        self._frame_image_cache.clear()
+
+        if hasattr(self, "_timeline"):
+            self._timeline.shutdown_loading(wait_ms=250)
+        self._wait_for_thread_pool(self._frame_pool, 250)
+
+        if hasattr(self, "_canvas"):
+            self._canvas.release_resources()
+        self._set_task_message("Closing")
+        QApplication.processEvents()
+
     def closeEvent(self, event):
         if self._detector_training or self._detector_prediction:
             QMessageBox.information(
@@ -2415,6 +2441,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if self._handle_dirty_before_context_change("closing"):
+            self._shutdown_background_loaders()
             event.accept()
         else:
             event.ignore()

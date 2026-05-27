@@ -380,6 +380,20 @@ class ImageCanvas(QGraphicsView):
 
     # ------------------------------------------------------------------ public
 
+    def release_resources(self):
+        self.stop_flash()
+        self._scene.clear()
+        self._box_items.clear()
+        self._reference_items.clear()
+        self._trajectory_items.clear()
+        self._frame_pixmap = None
+        self._minimap_base = None
+        self._draw_item = None
+        self._draw_start = None
+        self._panning = False
+        self._overlay_active = False
+        self._minimap.hide()
+
     def clear_selection(self):
         self.stop_flash()
         self._scene.clearSelection()

@@ -171,6 +171,15 @@ class TimelineWidget(QWidget):
         self._prefetch = max(0, int(prefetch))
         self._pool.setMaxThreadCount(max(1, int(max_threads)))
 
+    def shutdown_loading(self, wait_ms: int = 250):
+        self._generation += 1
+        self._loading_indexes.clear()
+        self._pool.clear()
+        try:
+            self._pool.waitForDone(max(0, int(wait_ms)))
+        except TypeError:
+            self._pool.waitForDone()
+
     def load_frames(self, paths: List[Path], eager_index: Optional[int] = None):
         self._generation += 1
         generation = self._generation

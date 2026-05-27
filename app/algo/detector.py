@@ -40,6 +40,22 @@ class TrainingResult:
     skipped_frame_count: int = 0
 
 
+def _is_yolox_model(base_model: str) -> bool:
+    return str(base_model).startswith("yolox:")
+
+
+def _ensure_supported_backend(base_model: str) -> None:
+    if not _is_yolox_model(base_model):
+        return
+    variant = str(base_model).split(":", 1)[1].upper()
+    raise DetectorError(
+        f"YOLOX-{variant} is available in the model menu, but this build still uses the "
+        "Ultralytics YOLO backend for tiled inference and fine-tuning. YOLOX requires a "
+        "separate backend with official YOLOX checkpoints and its training pipeline. "
+        "Choose YOLO11 Nano for now, or install/add the YOLOX backend before selecting this model."
+    )
+
+
 def _load_yolo():
     config_dir = Path(tempfile.gettempdir()) / "FineLabelTool" / "ultralytics"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -328,6 +344,7 @@ def suggest_detections(
     image_size: int,
     device: str = "auto",
 ) -> DetectionResult:
+    _ensure_supported_backend(base_model)
     YOLO = _load_yolo()
     selected_device = _select_device(device)
     image = _load_pil_image(image_path)
@@ -504,6 +521,7 @@ def train_detector(
     image_size: int,
     device: str = "auto",
 ) -> TrainingResult:
+    _ensure_supported_backend(base_model)
     YOLO = _load_yolo()
     selected_device = _select_device(device)
     root = detector_root(clip_path)

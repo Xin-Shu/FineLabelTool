@@ -27,5 +27,6 @@ _PALETTE = [
 def get_color(identity_id: int) -> QColor:
     if identity_id < 0:
         return QColor(160, 160, 160)
-    r, g, b = _PALETTE[identity_id % len(_PALETTE)]
+    palette_index = max(0, identity_id - 1)
+    r, g, b = _PALETTE[palette_index % len(_PALETTE)]
     return QColor(r, g, b)

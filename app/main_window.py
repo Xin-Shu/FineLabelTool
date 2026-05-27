@@ -1,14 +1,15 @@
 from __future__ import annotations
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import QEvent, QObject, QSize, QSettings, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QImageReader, QKeySequence, QPixmap
+from PyQt5.QtCore import QEvent, QObject, QRunnable, QSize, QSettings, Qt, QThread, QThreadPool, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont, QImage, QImageReader, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QApplication, QComboBox, QHeaderView, QKeySequenceEdit, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QScrollArea, QShortcut, QSpinBox, QSplitter, QStatusBar, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -307,6 +308,32 @@ class _DetectorTrainWorker(QObject):
             self.failed.emit(f"Unexpected detector training error: {exc}")
 
 
+class _FrameLoadSignals(QObject):
+    loaded = pyqtSignal(int, int, QImage)
+    failed = pyqtSignal(int, int, str)
+
+
+class _FrameLoadTask(QRunnable):
+    def __init__(self, generation: int, index: int, path: Path, signals: _FrameLoadSignals):
+        super().__init__()
+        self.generation = generation
+        self.index = index
+        self.path = path
+        self.signals = signals
+
+    def run(self):
+        reader = QImageReader(str(self.path))
+        reader.setAutoTransform(True)
+        image = reader.read()
+        try:
+            if image.isNull():
+                self.signals.failed.emit(self.generation, self.index, reader.errorString())
+            else:
+                self.signals.loaded.emit(self.generation, self.index, image)
+        except RuntimeError:
+            pass
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -335,6 +362,18 @@ class MainWindow(QMainWindow):
         self._detector_training = False
         self._detector_prediction = False
         self._detector_train_queued = False
+        self._frame_image_cache: OrderedDict[int, QImage] = OrderedDict()
+        self._frame_loading_indexes: set[int] = set()
+        self._frame_load_generation = 0
+        self._frame_cache_max = 3
+        self._frame_prefetch_radius = 1
+        self._pending_frame_index: Optional[int] = None
+        self._displayed_frame_index: Optional[int] = None
+        self._frame_load_signals = _FrameLoadSignals()
+        self._frame_load_signals.loaded.connect(self._on_frame_image_loaded)
+        self._frame_load_signals.failed.connect(self._on_frame_image_failed)
+        self._frame_pool = QThreadPool(self)
+        self._frame_pool.setMaxThreadCount(1)
         self._shortcuts: List[QShortcut] = []
         self._settings = QSettings("Xin-Shu", "FineLabelTool")
         self._hotkeys = self._load_hotkeys()
@@ -430,11 +469,22 @@ class MainWindow(QMainWindow):
         self._lbl_save_state = QLabel("No edits")
         self._lbl_save_state.setAlignment(Qt.AlignCenter)
         self._lbl_save_state.setMinimumWidth(140)
+        self._lbl_task = QLabel("Task: Ready")
+        self._lbl_task.setStyleSheet(
+            "QLabel { background: #e5e7eb; color: #334155; border: 1px solid #cbd5e1; "
+            "border-radius: 8px; padding: 3px 8px; font-weight: 600; }"
+        )
+        self._task_progress = QProgressBar()
+        self._task_progress.setTextVisible(False)
+        self._task_progress.setFixedSize(90, 8)
+        self._task_progress.hide()
         btn_dataset = QPushButton("Dataset...")
         btn_dataset.clicked.connect(self._select_dataset)
         top.addWidget(self._lbl_dataset)
         top.addWidget(btn_dataset)
         top.addStretch()
+        top.addWidget(self._lbl_task)
+        top.addWidget(self._task_progress)
         top.addWidget(self._lbl_save_state)
         top.addWidget(self._lbl_frame)
         layout.addLayout(top)
@@ -549,6 +599,16 @@ class MainWindow(QMainWindow):
         self._btn_draw_box.toggled.connect(self._toggle_draw_box)
         fg.addWidget(self._btn_draw_box)
 
+        self._btn_hide_ids = QPushButton()
+        self._btn_hide_ids.setCheckable(True)
+        self._btn_hide_ids.setToolTip("Hide or show ID numbers drawn inside bounding boxes")
+        hide_ids_value = self._settings.value("view/hide_ids", False)
+        hide_ids = str(hide_ids_value).lower() in ("true", "1", "yes")
+        self._btn_hide_ids.setChecked(hide_ids)
+        self._set_id_numbers_hidden(hide_ids, show_status=False)
+        self._btn_hide_ids.toggled.connect(self._set_id_numbers_hidden)
+        fg.addWidget(self._btn_hide_ids)
+
         layout.addWidget(frm_grp)
 
         # --- detector assist group ---
@@ -560,14 +620,19 @@ class MainWindow(QMainWindow):
         detector_model_row = QHBoxLayout()
         detector_model_row.addWidget(QLabel("Model:"))
         self._detector_model = QComboBox()
-        self._detector_model.addItem("YOLO nano", "yolo11n.pt")
-        self._detector_model.addItem("YOLOv8 nano", "yolov8n.pt")
+        self._detector_model.addItem("YOLO11 Nano", "yolo11n.pt")
+        self._detector_model.addItem("YOLOX Nano", "yolox:nano")
+        self._detector_model.addItem("YOLOX Tiny", "yolox:tiny")
+        self._detector_model.addItem("YOLOX Small", "yolox:s")
+        self._detector_model.addItem("YOLOX Medium", "yolox:m")
+        self._detector_model.addItem("YOLOX Large", "yolox:l")
+        self._detector_model.addItem("YOLOX X-Large", "yolox:x")
         saved_model = self._settings.value("detector/base_model", "yolo11n.pt")
         for row_idx in range(self._detector_model.count()):
             if self._detector_model.itemData(row_idx) == saved_model:
                 self._detector_model.setCurrentIndex(row_idx)
                 break
-        self._detector_model.currentIndexChanged.connect(self._save_detector_settings)
+        self._detector_model.currentIndexChanged.connect(self._on_detector_model_changed)
         detector_model_row.addWidget(self._detector_model, 1)
         dg.addLayout(detector_model_row)
 
@@ -745,6 +810,17 @@ class MainWindow(QMainWindow):
             self._settings.endGroup()
             self._settings.sync()
 
+    def _set_id_numbers_hidden(self, hidden: bool, show_status: bool = True):
+        if not hasattr(self, "_btn_hide_ids"):
+            return
+        hidden = bool(hidden)
+        self._canvas.set_identity_labels_visible(not hidden)
+        self._btn_hide_ids.setText("Show ID Numbers" if hidden else "Hide ID Numbers")
+        self._settings.setValue("view/hide_ids", hidden)
+        self._settings.sync()
+        if show_status and hasattr(self, "_status"):
+            self._status.showMessage("ID numbers hidden." if hidden else "ID numbers shown.", 3000)
+
     def _save_detector_settings(self, *args):
         if not hasattr(self, "_detector_model"):
             return
@@ -754,10 +830,19 @@ class MainWindow(QMainWindow):
         self._settings.setValue("detector/auto_update", self._chk_detector_auto.isChecked())
         self._settings.sync()
 
+    def _on_detector_model_changed(self, *args):
+        self._save_detector_settings()
+        self._suggested_detection_boxes = []
+        self._canvas.clear_reference_boxes()
+        self._refresh_detector_status()
+
     def _detector_base_model(self) -> str:
         if not hasattr(self, "_detector_model"):
             return "yolo11n.pt"
         return str(self._detector_model.currentData() or self._detector_model.currentText())
+
+    def _detector_needs_yolox_backend(self) -> bool:
+        return self._detector_base_model().startswith("yolox:")
 
     def _detector_image_size(self) -> int:
         return 640
@@ -776,8 +861,9 @@ class MainWindow(QMainWindow):
             return
         has_dataset = bool(self._clip_path and self._frame_paths)
         busy = self._detector_prediction or self._detector_training
-        self._btn_suggest_detections.setEnabled(has_dataset and not busy)
-        self._btn_update_detector.setEnabled(has_dataset and not self._detector_training)
+        backend_ready = not self._detector_needs_yolox_backend()
+        self._btn_suggest_detections.setEnabled(has_dataset and not busy and backend_ready)
+        self._btn_update_detector.setEnabled(has_dataset and not self._detector_training and backend_ready)
         self._btn_accept_detections.setEnabled(bool(self._suggested_detection_boxes) and not busy)
         self._btn_clear_detections.setEnabled(bool(self._suggested_detection_boxes))
 
@@ -786,6 +872,10 @@ class MainWindow(QMainWindow):
             return
         if not self._clip_path:
             self._set_detector_status("Detector: open a dataset to begin")
+            self._set_detector_controls_enabled()
+            return
+        if self._detector_needs_yolox_backend():
+            self._set_detector_status("Detector: YOLOX backend not installed yet", "#9a3412")
             self._set_detector_controls_enabled()
             return
         model_path = trained_model_path(self._clip_path)
@@ -856,6 +946,49 @@ class MainWindow(QMainWindow):
         if hasattr(self._timeline, "center_current"):
             self._timeline.center_current()
 
+    def _set_task_message(self, text: str, *, active: bool = False, color: str = "#334155"):
+        if not hasattr(self, "_lbl_task"):
+            return
+        self._lbl_task.setText(f"Task: {text}")
+        self._lbl_task.setStyleSheet(
+            "QLabel { background: #e5e7eb; border: 1px solid #cbd5e1; "
+            f"color: {color}; border-radius: 8px; padding: 3px 8px; font-weight: 600; }}"
+        )
+        if active:
+            self._task_progress.setRange(0, 0)
+            self._task_progress.show()
+        else:
+            self._task_progress.hide()
+
+    def _configure_frame_loading_policy(self, focus_index: int):
+        sample_indices = sorted({
+            0,
+            max(0, min(focus_index, len(self._frame_paths) - 1)),
+            max(0, len(self._frame_paths) // 2),
+            max(0, len(self._frame_paths) - 1),
+        })
+        sizes = []
+        for idx in sample_indices:
+            try:
+                sizes.append(self._frame_paths[idx].stat().st_size)
+            except OSError:
+                pass
+        max_size = max(sizes) if sizes else 0
+        mib = max_size / (1024 * 1024)
+        if mib >= 70:
+            cache_max, radius, threads, thumb_threads, thumb_prefetch = 1, 0, 1, 1, 1
+        elif mib >= 35:
+            cache_max, radius, threads, thumb_threads, thumb_prefetch = 3, 1, 1, 1, 2
+        elif mib >= 12:
+            cache_max, radius, threads, thumb_threads, thumb_prefetch = 5, 2, 2, 1, 4
+        else:
+            cache_max, radius, threads, thumb_threads, thumb_prefetch = 12, 6, 2, 2, 8
+        self._frame_cache_max = cache_max
+        self._frame_prefetch_radius = radius
+        self._frame_pool.setMaxThreadCount(threads)
+        if hasattr(self._timeline, "set_loading_policy"):
+            self._timeline.set_loading_policy(max_threads=thumb_threads, prefetch=thumb_prefetch)
+
     # ------------------------------------------------------------------ dataset
 
     def _select_dataset(self):
@@ -878,13 +1011,21 @@ class MainWindow(QMainWindow):
     def _load_dataset(self, clip_path: Path):
         self._clip_path = clip_path
         self._lbl_dataset.setText(f"Dataset: {clip_path.name}")
+        self._set_task_message("Scanning dataset...", active=True, color="#1d4ed8")
+        QApplication.processEvents()
 
         frame_dir = clip_path / "frame"
         self._frame_paths = sorted(frame_dir.glob("*.png"))
         if not self._frame_paths:
             self._status.showMessage(f"No .png frames found in {frame_dir}")
+            self._set_task_message("No frames", color="#b91c1c")
             return
 
+        self._frame_load_generation += 1
+        self._frame_image_cache.clear()
+        self._frame_loading_indexes.clear()
+        self._pending_frame_index = None
+        self._displayed_frame_index = None
         self._boxes_per_frame.clear()
         self._completed.clear()
         self._dirty_frames.clear()
@@ -905,6 +1046,7 @@ class MainWindow(QMainWindow):
                 first_unlabelled = i
                 found_unlabelled = True
 
+        self._configure_frame_loading_policy(first_unlabelled)
         self._timeline.load_frames(self._frame_paths, eager_index=first_unlabelled)
         for i, done in self._completed.items():
             if done:
@@ -1043,12 +1185,12 @@ class MainWindow(QMainWindow):
             for idx in (self._current_index, self._current_index - 1, self._current_index + 1):
                 if 0 <= idx < len(self._frame_paths):
                     used.update(self._ids_in_frame(self._get_boxes(idx)))
-        return max(used) + 1 if used else 0
+        return max(max(used) + 1, 1) if used else 1
 
     def _update_next_id_button(self):
         if not hasattr(self, "_btn_assign_next_id"):
             return
-        next_id = self._next_unused_identity() if self._frame_paths else 0
+        next_id = self._next_unused_identity() if self._frame_paths else 1
         self._btn_assign_next_id.setText(f"New ID: {next_id}")
         enabled = self._selected_box is not None
         self._btn_assign_next_id.setEnabled(enabled)
@@ -1313,6 +1455,9 @@ class MainWindow(QMainWindow):
     def _frame_image_size(self, index: int) -> Optional[QSize]:
         if not 0 <= index < len(self._frame_paths):
             return None
+        cached = self._frame_image_cache.get(index)
+        if cached is not None and not cached.isNull():
+            return QSize(cached.width(), cached.height())
         size = QImageReader(str(self._frame_paths[index])).size()
         return size if size.isValid() else None
 
@@ -1353,10 +1498,14 @@ class MainWindow(QMainWindow):
     def _suggest_detections_current_frame(self):
         if not self._clip_path or not self._frame_paths or self._detector_prediction:
             return
+        if self._pending_frame_index is not None:
+            self._status.showMessage("Wait for the current frame to finish loading before running detector suggestions.", 4000)
+            return
         self._clear_suggested_detections(show_status=False)
         self._detector_prediction = True
         self._set_detector_controls_enabled()
         self._set_detector_status("Detector: running on current frame...", "#1d4ed8")
+        self._set_task_message("Running detector...", active=True, color="#1d4ed8")
         self._status.showMessage("Running detector suggestions for this frame.", 3000)
 
         thread = QThread(self)
@@ -1383,6 +1532,7 @@ class MainWindow(QMainWindow):
 
     def _on_detector_suggestions_ready(self, index: int, boxes: List[Box], source: str, device: str, tile_count: int):
         if index != self._current_index:
+            self._set_task_message("Ready")
             self._status.showMessage(
                 f"Detector suggestions for frame {index + 1} were discarded after frame change.",
                 4000,
@@ -1395,6 +1545,7 @@ class MainWindow(QMainWindow):
             self._canvas.clear_reference_boxes()
             self._set_trajectory_button_checked(False)
             self._set_detector_status(f"Detector: no boxes at conf {self._detector_conf.value():.2f}", "#9a3412")
+            self._set_task_message("Ready")
             self._status.showMessage("Detector found no boxes on this frame.", 4000)
             return
         self._set_trajectory_button_checked(False)
@@ -1408,12 +1559,14 @@ class MainWindow(QMainWindow):
             f"Detector suggested {len(boxes)} box(es). Review, then Accept New or Clear.",
             5000,
         )
+        self._set_task_message("Ready")
 
     def _on_detector_suggestions_failed(self, index: int, message: str):
         self._suggested_detection_boxes = []
         self._canvas.clear_reference_boxes()
         self._set_trajectory_button_checked(False)
         self._set_detector_status("Detector: suggestion failed", "#b91c1c")
+        self._set_task_message("Detector failed", color="#b91c1c")
         QMessageBox.warning(self, "Detector Suggestion Failed", message)
 
     def _on_detector_prediction_finished(self):
@@ -1492,6 +1645,7 @@ class MainWindow(QMainWindow):
         if not completed_indices:
             self._detector_train_queued = False
             self._set_detector_status("Detector: no completed labels to train from", "#9a3412")
+            self._set_task_message("Ready")
             self._status.showMessage("Complete and save at least one labelled frame before updating the detector.", 5000)
             return
 
@@ -1499,6 +1653,7 @@ class MainWindow(QMainWindow):
         self._detector_training = True
         self._set_detector_controls_enabled()
         self._set_detector_status(f"Detector: training on {len(completed_indices)} completed frame(s)...", "#1d4ed8")
+        self._set_task_message("Training detector...", active=True, color="#1d4ed8")
         self._status.showMessage("Detector training started in the background.", 4000)
 
         thread = QThread(self)
@@ -1529,16 +1684,19 @@ class MainWindow(QMainWindow):
                 f"Detector: already current; {result.skipped_frame_count} completed frame(s) reused",
                 "#166534",
             )
+            self._set_task_message("Ready")
             self._status.showMessage("Detector already includes the completed labels. No training needed.", 5000)
             return
         self._set_detector_status(
             f"Detector: updated on {result.frame_count} new/changed frame(s), {result.tile_count} tile(s), {result.box_count} label(s) using {result.device}",
             "#166534",
         )
+        self._set_task_message("Ready")
         self._status.showMessage("Detector update finished. New suggestions will use the trained model.", 5000)
 
     def _on_detector_training_failed(self, message: str):
         self._set_detector_status("Detector: update failed", "#b91c1c")
+        self._set_task_message("Detector failed", color="#b91c1c")
         QMessageBox.warning(self, "Detector Update Failed", message)
 
     def _on_detector_training_thread_finished(self):
@@ -1581,25 +1739,72 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ navigation
 
-    def _goto_frame(self, index: int):
-        if not self._frame_paths:
-            return
-        if hasattr(self, "_btn_draw_box") and self._btn_draw_box.isChecked():
-            self._btn_draw_box.setChecked(False)
-        index = max(0, min(index, len(self._frame_paths) - 1))
-        if index != self._current_index:
-            self._direct_unassigned_cursor = 0
-            self._direct_disappeared_cursor = 0
-        self._current_index = index
+    def _cache_frame_image(self, index: int, image: QImage):
+        self._frame_image_cache[index] = image
+        self._frame_image_cache.move_to_end(index)
+        while len(self._frame_image_cache) > self._frame_cache_max:
+            evicted = False
+            for key in list(self._frame_image_cache.keys()):
+                if key not in (self._current_index, self._pending_frame_index):
+                    self._frame_image_cache.pop(key, None)
+                    evicted = True
+                    break
+            if not evicted:
+                break
 
-        pix = QPixmap(str(self._frame_paths[index]))
+    def _request_frame_image(self, index: int, *, priority: bool = False):
+        if not 0 <= index < len(self._frame_paths):
+            return
+        if index in self._frame_image_cache or index in self._frame_loading_indexes:
+            return
+        self._frame_loading_indexes.add(index)
+        task = _FrameLoadTask(
+            self._frame_load_generation,
+            index,
+            self._frame_paths[index],
+            self._frame_load_signals,
+        )
+        self._frame_pool.start(task, 1 if priority else 0)
+
+    def _prefetch_frames_around(self, index: int):
+        if self._frame_prefetch_radius <= 0:
+            return
+        for offset in range(1, self._frame_prefetch_radius + 1):
+            self._request_frame_image(index - offset)
+            self._request_frame_image(index + offset)
+
+    def _on_frame_image_loaded(self, generation: int, index: int, image: QImage):
+        self._frame_loading_indexes.discard(index)
+        if generation != self._frame_load_generation:
+            return
+        self._cache_frame_image(index, image)
+        if index == self._pending_frame_index:
+            self._display_frame_image(index, image)
+
+    def _on_frame_image_failed(self, generation: int, index: int, message: str):
+        self._frame_loading_indexes.discard(index)
+        if generation != self._frame_load_generation:
+            return
+        if index == self._pending_frame_index:
+            self._pending_frame_index = None
+            self._canvas.setEnabled(True)
+            self._set_task_message("Frame load failed", color="#b91c1c")
+            self._status.showMessage(f"Cannot read frame {index + 1}: {message}", 6000)
+
+    def _display_frame_image(self, index: int, image: QImage):
+        self._pending_frame_index = None
+        pix = QPixmap.fromImage(image)
         if pix.isNull():
-            self._status.showMessage(f"Cannot read frame {self._frame_paths[index]}")
+            self._canvas.setEnabled(True)
+            self._set_task_message("Frame load failed", color="#b91c1c")
+            self._status.showMessage(f"Cannot display frame {self._frame_paths[index]}", 6000)
             return
 
         boxes = self._get_boxes(index)
-        keep_zoom = not self._first_load
+        keep_zoom = not self._first_load and self._displayed_frame_index is not None
         self._canvas.load_frame(pix, boxes, keep_zoom=keep_zoom)
+        self._canvas.setEnabled(True)
+        self._displayed_frame_index = index
         self._suggested_detection_boxes = []
         self._canvas.clear_reference_boxes()
         self._set_trajectory_button_checked(False)
@@ -1622,6 +1827,50 @@ class MainWindow(QMainWindow):
         self._btn_complete.setText("Completed" if done else "Mark Completed")
 
         self._on_box_deselected()
+        self._set_task_message("Ready")
+        self._prefetch_frames_around(index)
+
+    def _goto_frame(self, index: int):
+        if not self._frame_paths:
+            return
+        if hasattr(self, "_btn_draw_box") and self._btn_draw_box.isChecked():
+            self._btn_draw_box.setChecked(False)
+        index = max(0, min(index, len(self._frame_paths) - 1))
+        if index != self._current_index:
+            self._direct_unassigned_cursor = 0
+            self._direct_disappeared_cursor = 0
+        self._current_index = index
+
+        self._pending_frame_index = index
+        self._canvas.setEnabled(False)
+        self._suggested_detection_boxes = []
+        self._canvas.clear_reference_boxes()
+        self._set_trajectory_button_checked(False)
+        self._canvas.clear_warning_notices()
+        self._active_overlay_key = None
+        self._current_boxes_hidden_for_overlay = False
+
+        self._timeline.set_current(index)
+        n = len(self._frame_paths)
+        dirty = " *" if index in self._dirty_frames else ""
+        self._lbl_frame.setText(f"Frame: {index + 1} / {n}{dirty}")
+        self._update_save_state()
+        self._set_detector_controls_enabled()
+
+        done = self._completed.get(index, False)
+        self._btn_complete.setChecked(done)
+        self._btn_complete.setText("Completed" if done else "Mark Completed")
+
+        self._on_box_deselected()
+        cached = self._frame_image_cache.get(index)
+        if cached is not None:
+            self._frame_image_cache.move_to_end(index)
+            self._display_frame_image(index, cached)
+            return
+
+        self._set_task_message(f"Loading frame {index + 1}/{n}", active=True, color="#1d4ed8")
+        self._status.showMessage(f"Loading frame {index + 1}...", 3000)
+        self._request_frame_image(index, priority=True)
 
     def _prev_frame(self):
         self._goto_frame(self._current_index - 1)
@@ -1631,6 +1880,9 @@ class MainWindow(QMainWindow):
 
     def _show_adjacent_overlay(self, key: int):
         if not self._frame_paths:
+            return
+        if self._pending_frame_index is not None:
+            self._status.showMessage("Wait for the current frame to finish loading before showing overlays.")
             return
         if self._canvas.is_interacting():
             self._status.showMessage("Release the mouse before showing frame overlays.")
@@ -1734,11 +1986,11 @@ class MainWindow(QMainWindow):
             return
         try:
             identity = int(self._id_input.text())
-            if identity < 0:
+            if identity < 1:
                 raise ValueError
         except ValueError:
             self._clear_pending_id_state()
-            self._show_unavailable_warning("ID must be a non-negative integer.")
+            self._show_unavailable_warning("ID must be a positive integer starting from 1.")
             return
 
         # Case 1: same-frame duplicate — highlight the conflicting box
@@ -2100,6 +2352,9 @@ class MainWindow(QMainWindow):
     def _save_current(self):
         if not self._clip_path or not self._frame_paths:
             return False
+        if self._pending_frame_index is not None:
+            self._status.showMessage("Wait for the current frame to finish loading before saving.", 3000)
+            return False
         return self._save_frame(self._current_index)
 
     def _save_frame(self, idx: int) -> bool:
@@ -2200,6 +2455,12 @@ class MainWindow(QMainWindow):
         callbacks = self._shortcut_callbacks()
         for action, callback in callbacks.items():
             if self._event_matches_hotkey(event, action):
+                if self._pending_frame_index is not None and action not in (
+                    "prev_frame", "next_frame", "goto_frame",
+                    "ui_zoom_in", "ui_zoom_out", "ui_zoom_reset",
+                ):
+                    self._status.showMessage("Wait for the current frame to finish loading.", 3000)
+                    return True
                 if id_focused and not self._event_has_primary_modifier(event) and action not in ("delete_box",):
                     return False
                 self._canvas.stop_flash()

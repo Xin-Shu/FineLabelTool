@@ -56,6 +56,7 @@ class BoxItem(QGraphicsItem):
         self._drag_start: Optional[QPointF] = None
         self._orig: Optional[tuple] = None   # (xc, yc, w, h) at drag start
         self.highlighted: bool = False
+        self.identity_label_visible: bool = True
 
         if self.is_reference:
             self.setAcceptedMouseButtons(Qt.NoButton)
@@ -95,6 +96,10 @@ class BoxItem(QGraphicsItem):
         self.position_locked = position_locked
         self.size_locked = size_locked
         self.setCursor(QCursor(Qt.ArrowCursor))
+        self.update()
+
+    def set_identity_label_visible(self, visible: bool):
+        self.identity_label_visible = bool(visible)
         self.update()
 
     # ------------------------------------------------------------------ geom
@@ -166,7 +171,7 @@ class BoxItem(QGraphicsItem):
         painter.drawRect(r)
 
         # Identity label, drawn inside the top-right corner without a filled badge.
-        if self.box.identity >= 0:
+        if self.identity_label_visible and self.box.identity >= 0:
             label = str(self.box.identity)
             font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
             font.setPointSize(11)
@@ -349,6 +354,7 @@ class ImageCanvas(QGraphicsView):
         self._pan_v0 = 0
         self._overlay_active = False
         self._draw_mode = False
+        self._identity_labels_visible = True
         self._draw_start: Optional[QPointF] = None
         self._draw_item: Optional[QGraphicsRectItem] = None
         self._flash_timer = QTimer(self)
@@ -362,7 +368,7 @@ class ImageCanvas(QGraphicsView):
         self.verticalScrollBar().valueChanged.connect(self._update_minimap)
 
     def _try_enable_opengl_viewport(self):
-        if os.environ.get("APP_LABEL_USE_OPENGL") != "1":
+        if os.environ.get("APP_LABEL_USE_OPENGL", "1") == "0":
             return
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
             return
@@ -451,6 +457,7 @@ class ImageCanvas(QGraphicsView):
                 on_changed=self.box_changed.emit,
             )
             item.set_geometry_locks(self._position_locked, self._size_locked)
+            item.set_identity_label_visible(self._identity_labels_visible)
             self._scene.addItem(item)
             self._box_items.append(item)
 
@@ -477,6 +484,11 @@ class ImageCanvas(QGraphicsView):
             item.prepareGeometryChange()
             item.update()
 
+    def set_identity_labels_visible(self, visible: bool):
+        self._identity_labels_visible = bool(visible)
+        for item in self._box_items + self._reference_items:
+            item.set_identity_label_visible(self._identity_labels_visible)
+
     def focus_box(self, box: Box, flashes: int = 3):
         item = self._item_for_box(box)
         if item is None:
@@ -493,6 +505,7 @@ class ImageCanvas(QGraphicsView):
             self._img_h,
             reference_label=label,
         )
+        item.set_identity_label_visible(self._identity_labels_visible)
         item.highlighted = True
         self._scene.addItem(item)
         self._reference_items.append(item)
@@ -592,6 +605,7 @@ class ImageCanvas(QGraphicsView):
                 self._img_h,
                 reference_label=label,
             )
+            item.set_identity_label_visible(self._identity_labels_visible)
             self._scene.addItem(item)
             self._reference_items.append(item)
 
@@ -636,6 +650,7 @@ class ImageCanvas(QGraphicsView):
             self._img_h,
             reference_label="track",
         )
+        item.set_identity_label_visible(self._identity_labels_visible)
         item.highlighted = highlighted
         self._scene.addItem(item)
         self._reference_items.append(item)

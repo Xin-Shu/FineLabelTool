@@ -41,8 +41,9 @@ Multi-object tracking annotation needs more than drawing boxes. It also needs **
 
 ### Annotation
 - **Draw, move, resize, copy, and paste boxes** directly on the canvas
-- **Assign tracking IDs** with keyboard-first controls
+- **Assign tracking IDs** with keyboard-first controls; new IDs start from 1
 - **Assign the next unused ID** with the `New ID` button
+- **Hide ID Numbers** keeps box outlines visible while hiding in-frame identity text
 - **Undo recent edits** on each frame with `Ctrl+Z`
 
 ### Smart ID Assignment
@@ -65,6 +66,8 @@ The detector workflow is tile-first for high-resolution frames. The app splits e
 
 Detector assist is optional and uses [Ultralytics YOLO](https://docs.ultralytics.com/). For open-source use, review the Ultralytics AGPL-3.0 licensing terms and keep the repository license compatible with the detector dependency.
 
+YOLOX model sizes are shown in the detector selector as planned backend options. They require a separate YOLOX backend and checkpoints before they can run; use the YOLO11 option for the current built-in detector workflow.
+
 ### Navigation & Overlays
 - **Frame timeline** with async thumbnail loading and completion indicators
 - **Jump to any frame** directly by number (Ctrl+G)
@@ -78,12 +81,16 @@ Detector assist is optional and uses [Ultralytics YOLO](https://docs.ultralytics
 
 ### Workflow
 - **Searchable dataset picker** with screen-aware sizing
+- **Async frame loading** keeps the UI responsive on large image sequences
+- **Adaptive frame cache** limits memory use for very large PNG datasets
+- **OpenGL canvas acceleration** is enabled automatically when Qt can create an OpenGL viewport
 - **Mark frame as completed** with `Ctrl+Enter`; labels are saved immediately
 - **Sanity-gated completion** auto-marks a saved frame completed only when all checks pass
 - **Dataset switching** with unsaved-change protection
 - **Auto-skips to first unlabelled frame** when loading a dataset
 - **Customizable hotkeys** from the in-app Hotkeys dialog
 - **HUD warning badges** on the canvas for all conflict and overlay states
+- **Task badge** reports active frame, detector, and training work
 
 ---
 

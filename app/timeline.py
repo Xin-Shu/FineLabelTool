@@ -2,8 +2,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
+from PyQt5.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt5.QtGui import QImage, QImageReader, QPixmap, QPainter, QColor, QPen, QFont
 from PyQt5.QtWidgets import QWidget, QScrollArea, QHBoxLayout, QLabel
 
 THUMB_W = 80
@@ -26,7 +26,14 @@ class _ThumbLoadTask(QRunnable):
         self.signals = signals
 
     def run(self):
-        image = QImage(str(self.path))
+        reader = QImageReader(str(self.path))
+        reader.setAutoTransform(True)
+        source_size = reader.size()
+        if source_size.isValid() and not source_size.isEmpty():
+            scaled = source_size.scaled(QSize(THUMB_W, THUMB_H), Qt.KeepAspectRatio)
+            if scaled.isValid() and not scaled.isEmpty():
+                reader.setScaledSize(scaled)
+        image = reader.read()
         if not image.isNull():
             image = image.scaled(
                 THUMB_W,
@@ -151,13 +158,18 @@ class TimelineWidget(QWidget):
         self._current = 0
         self._generation = 0
         self._loading_indexes: set[int] = set()
+        self._prefetch = THUMB_PREFETCH
         self._signals = _ThumbSignals()
         self._signals.loaded.connect(self._on_thumb_loaded)
-        self._pool = QThreadPool.globalInstance()
+        self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(max(1, min(MAX_THUMB_THREADS, self._pool.maxThreadCount())))
         self._scroll.horizontalScrollBar().valueChanged.connect(
             lambda _: self._request_visible_thumbs()
         )
+
+    def set_loading_policy(self, *, max_threads: int = MAX_THUMB_THREADS, prefetch: int = THUMB_PREFETCH):
+        self._prefetch = max(0, int(prefetch))
+        self._pool.setMaxThreadCount(max(1, int(max_threads)))
 
     def load_frames(self, paths: List[Path], eager_index: Optional[int] = None):
         self._generation += 1
@@ -207,9 +219,9 @@ class TimelineWidget(QWidget):
         if not self._thumbs:
             return
         bar = self._scroll.horizontalScrollBar()
-        first = max(0, bar.value() // THUMB_STRIDE - THUMB_PREFETCH)
+        first = max(0, bar.value() // THUMB_STRIDE - self._prefetch)
         visible_count = max(1, self._scroll.viewport().width() // THUMB_STRIDE + 1)
-        last = min(len(self._thumbs) - 1, first + visible_count + THUMB_PREFETCH * 2)
+        last = min(len(self._thumbs) - 1, first + visible_count + self._prefetch * 2)
         for idx in range(first, last + 1):
             self._request_thumb(idx)
 
@@ -222,7 +234,7 @@ class TimelineWidget(QWidget):
             self._center_on_index(index)
             QTimer.singleShot(0, lambda i=index: self._center_on_index(i))
             QTimer.singleShot(120, lambda i=index: self._center_on_index(i))
-            for idx in range(max(0, index - THUMB_PREFETCH), min(len(self._thumbs), index + THUMB_PREFETCH + 1)):
+            for idx in range(max(0, index - self._prefetch), min(len(self._thumbs), index + self._prefetch + 1)):
                 self._request_thumb(idx)
             QTimer.singleShot(0, self._request_visible_thumbs)
 

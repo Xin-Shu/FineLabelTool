@@ -32,6 +32,17 @@ _CURSOR_MAP = {
 }
 
 
+class MinimapLabel(QLabel):
+    clicked = pyqtSignal(QPointF)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(QPointF(event.pos()))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class BoxItem(QGraphicsItem):
     def __init__(
         self,
@@ -330,11 +341,13 @@ class ImageCanvas(QGraphicsView):
         self._try_enable_opengl_viewport()
         self._overlay_notices: Dict[str, QLabel] = {}
         self._warning_notices: Dict[str, QLabel] = {}
-        self._minimap = QLabel(self)
+        self._minimap = MinimapLabel(self)
         self._minimap.setStyleSheet(
             "background: rgba(17, 24, 39, 190); border: 1px solid #f8fafc;"
         )
         self._minimap.setFixedSize(190, 110)
+        self._minimap.setCursor(QCursor(Qt.PointingHandCursor))
+        self._minimap.clicked.connect(self._recenter_from_minimap)
         self._minimap.hide()
 
         self._box_items: List[BoxItem] = []
@@ -352,6 +365,7 @@ class ImageCanvas(QGraphicsView):
         self._pan_start = None
         self._pan_h0 = 0
         self._pan_v0 = 0
+        self._pan_zoom_locked = False
         self._overlay_active = False
         self._draw_mode = False
         self._identity_labels_visible = True
@@ -391,6 +405,7 @@ class ImageCanvas(QGraphicsView):
         self._draw_item = None
         self._draw_start = None
         self._panning = False
+        self._pan_zoom_locked = False
         self._overlay_active = False
         self._minimap.hide()
 
@@ -453,6 +468,7 @@ class ImageCanvas(QGraphicsView):
         self._draw_start = None
         self._panning = False
         self._pan_start = None
+        self._pan_zoom_locked = False
         self.setCursor(QCursor(Qt.ArrowCursor))
 
         self._img_w = pixmap.width()
@@ -804,8 +820,8 @@ class ImageCanvas(QGraphicsView):
 
     def wheelEvent(self, event):
         self.stop_flash()
-        if self._overlay_active:
-            event.ignore()
+        if self._overlay_active or self._pan_zoom_locked:
+            event.accept()
             return
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         self.scale(factor, factor)
@@ -839,6 +855,25 @@ class ImageCanvas(QGraphicsView):
             self.viewport().width() - self._minimap.width() - margin,
             self.viewport().height() - self._minimap.height() - margin,
         )
+
+    def _recenter_from_minimap(self, point: QPointF):
+        scene_rect = self._scene.sceneRect()
+        if scene_rect.isEmpty() or self._minimap_base is None:
+            return
+        ox = self._minimap_base_offset.x()
+        oy = self._minimap_base_offset.y()
+        draw_w = self._minimap_base.width() - 2 * ox
+        draw_h = self._minimap_base.height() - 2 * oy
+        preview_rect = QRectF(ox, oy, draw_w, draw_h)
+        if draw_w <= 0 or draw_h <= 0 or not preview_rect.contains(point):
+            return
+        x_ratio = (point.x() - ox) / draw_w
+        y_ratio = (point.y() - oy) / draw_h
+        self.centerOn(QPointF(
+            scene_rect.left() + x_ratio * scene_rect.width(),
+            scene_rect.top() + y_ratio * scene_rect.height(),
+        ))
+        self._update_minimap()
 
     def _update_minimap(self):
         if self._frame_pixmap is None or self._scene.sceneRect().isEmpty():
@@ -922,6 +957,7 @@ class ImageCanvas(QGraphicsView):
             return
         if event.button() == Qt.MiddleButton:
             self._panning = True
+            self._pan_zoom_locked = True
             self._pan_start = event.pos()
             self._pan_h0 = self.horizontalScrollBar().value()
             self._pan_v0 = self.verticalScrollBar().value()
@@ -980,6 +1016,7 @@ class ImageCanvas(QGraphicsView):
             return
         if event.button() == Qt.MiddleButton and self._panning:
             self._panning = False
+            self._pan_zoom_locked = False
             self._pan_start = None
             self.setCursor(QCursor(Qt.ArrowCursor))
             event.accept()

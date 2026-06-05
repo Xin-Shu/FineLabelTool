@@ -2511,9 +2511,6 @@ class MainWindow(QMainWindow):
         event_sequence = QKeySequence(modifiers | int(event.key()))
         if event_sequence.matches(sequence) == QKeySequence.ExactMatch:
             return True
-        if action == "delete_box" and configured in ("Del", "Delete"):
-            if modifiers == 0 and event.key() == Qt.Key_Backspace:
-                return True
         if configured.startswith("Ctrl+"):
             meta_sequence = QKeySequence("Meta+" + configured[5:])
             if event_sequence.matches(meta_sequence) == QKeySequence.ExactMatch:

@@ -140,16 +140,18 @@ Place your datasets inside the `data/` folder. Each dataset is a subfolder with 
 data/
 └── my_dataset/
     ├── frame/               # Input images — one PNG per frame
-    │   ├── 000001.png
-    │   ├── 000002.png
+    │   ├── img0001.png
+    │   ├── img0002.png
     │   └── ...
     ├── label_det/           # (Optional) Detector output — one .txt per frame
-    │   ├── 000001.txt
+    │   ├── img0001.txt
     │   └── ...
     └── label_gt/            # Ground-truth output — created by the app on save
-        ├── 000001.txt
+        ├── img0001.txt
         └── ...
 ```
+
+Large datasets are intentionally kept out of Git. The repository ignores `data/`, model weights, detector caches, and generated MOT exports.
 
 ### Label File Formats
 
@@ -164,6 +166,24 @@ Coordinates are normalised to `[0, 1]`. Confidence is optional.
 identity  x_center  y_center  width  height
 ```
 Only boxes with an assigned identity are saved. Unassigned boxes are discarded at save time.
+
+**MOT exports** (`gt.txt`) use the standard 10-column MOTChallenge-style layout:
+```
+frame,id,x1,y1,w,h,conf,-1,-1,-1
+```
+Frame numbers and IDs are 1-based. MOT box coordinates are pixel-based upper-left `x1,y1,width,height`, while app-native `label_gt` files stay normalised.
+
+### Prepared Dataset Notes
+
+The local CVIP360 conversion follows the dataset README from Mazzola et al., *A dataset of annotated omnidirectional videos for distancing applications* (Journal of Imaging, 2021). CVIP360 annotations are repeated pixel `[x,y,w,h]` boxes per video frame and do not include explicit identity IDs, so the conversion assigns MOT IDs by box order within each annotation row.
+
+For the prepared local CVIP360 copy:
+- `17` clips are organised as `clip/frame/`, `clip/gt.txt`, and `clip/cvip360_meta.json`
+- `18,488` decoded `3840 x 2160` PNG frames are available
+- `56,074` MOT rows are written across all `gt.txt` files
+- `5` full-resolution GT overlay preview PNGs are saved under `data/cvip360/gt_preview_samples/`
+
+Some CVIP360 videos decode to 1-2 fewer frames than their annotation text rows. The converter caps `gt.txt` to the actual decoded `imgXXXX.png` count so MOT rows never point to missing frames.
 
 ---
 

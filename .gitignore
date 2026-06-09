@@ -12,6 +12,11 @@ data/
 run.bat
 run.sh
 
+# Local dataset MOT export helpers
+scripts/mot_gt_export.py
+data/**/gt_collect.py
+data/**/gt.txt
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]

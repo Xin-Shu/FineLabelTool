@@ -1,49 +1,6 @@
-<div align="center">
-
 # Label & Track
 
-**A desktop tool for precise multi-object tracking annotation.**<br>
-*<em>Fully implemented by <a href="https://openai.com/codex/"><img src="docs/codex.png" alt="Codex" height="18" /></a> and <a href="https://www.anthropic.com/claude-code"><img src="docs/claudecode-color.svg" alt="Claude Code" height="18" /></a>*<br>
-[![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![PyQt5](https://img.shields.io/badge/PyQt5-5.15%2B-41CD52?style=flat-square)](https://pypi.org/project/PyQt5/)
-[![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square)](https://github.com)
-
-</div>
-
----
-
-## Overview
-
-Label & Track is a PyQt5 annotation app for image-sequence MOT datasets. It focuses on fast box editing, identity consistency, frame-to-frame review, and optional detector/tracker assistance.
-
-<p align="center">
-  <img src="docs/screenshots/main_interface.png" width="860" alt="Label & Track main annotation interface"/>
-  <br/>
-  <em>Main interface with canvas, timeline, and annotation sidebar</em>
-</p>
-
-## Main Features
-
-- Draw, move, resize, delete, copy, and paste bounding boxes.
-- Assign and clear tracking IDs; new IDs start from `1`.
-- Select all boxes, undo edits, hide ID text, and customize hotkeys.
-- Mark frames completed only after labels are saved and sanity checks pass.
-- Review adjacent frames with ghost overlays: previous (`Q`), next (`W`), detections (`D`).
-- Show single-ID or all-ID trajectories, including disappeared tracks.
-- Use Direct navigation to jump to unassigned boxes or disappeared-ID locations.
-- Keep large sequences responsive with async frame loading, async thumbnails, adaptive frame caching, and an optional OpenGL canvas.
-
-## ID And Detection Assist
-
-- **ID Summary** compares the current frame against the previous frame and highlights added, disappeared, stayed, and unassigned IDs.
-- **OmniSORT suggestion** proposes IDs for current-frame boxes from the previous completed frame. This is an interactive adaptation of [Xin-Shu/OmniSORT](https://github.com/Xin-Shu/OmniSORT), not a full-sequence batch tracker.
-- **Suggest Detections** runs tiled YOLO inference on the current frame, maps tile detections back to full-frame coordinates, and merges overlap duplicates.
-- **Accept New** adds only detector suggestions that do not overlap existing boxes.
-- **Update Detector** fine-tunes YOLO on tiled crops from completed saved labels. Incremental updates train only on new or changed completed labels after the first detector model is available.
-- GPU acceleration is used when PyTorch detects CUDA or Apple MPS; otherwise the app falls back to CPU.
-
-Detector assist is optional and uses [Ultralytics YOLO](https://docs.ultralytics.com/). Review its AGPL-3.0 terms before distributing detector-enabled builds. YOLOX entries are visible as planned backend options, but the current built-in detector workflow uses YOLO11 Nano.
+A desktop PyQt5 tool for annotating image-sequence multi-object tracking datasets.
 
 ## Install
 
@@ -69,9 +26,44 @@ run.bat          # Windows
 python app/main.py
 ```
 
+## Basic Workflow
+
+1. Click `Dataset...` or `Open Dataset...` and choose a dataset folder.
+2. Draw or edit boxes on the canvas.
+3. Assign identities in the sidebar. New IDs start from `1`.
+4. Use overlays to compare frames:
+   - hold `Q` for previous-frame boxes
+   - hold `W` for next-frame boxes
+   - hold `D` for detector boxes
+5. Use `Suggest IDs` to propagate IDs from the previous completed frame.
+6. Use `Suggest Detections` and `Accept New` to add detector proposals.
+7. Press `Ctrl+S` to save.
+8. Press `Ctrl+Enter` to save and mark the frame completed if sanity checks pass.
+
+The app protects unsaved edits when switching datasets or closing the window.
+
+## Main Controls
+
+- Draw, move, resize, delete, copy, paste, and undo boxes.
+- Select all boxes on the current frame with `Ctrl+A`.
+- Hide in-frame ID numbers while keeping box outlines visible.
+- Jump directly to unassigned boxes or disappeared-ID locations from the sidebar.
+- Show one trajectory or all trajectories seen up to the current frame.
+- Customize shortcuts from the in-app Hotkeys dialog.
+
+## ID And Detection Assist
+
+- `ID Summary` compares the current frame against the previous frame and reports added, disappeared, stayed, and unassigned IDs.
+- `Suggest IDs` uses the app's interactive OmniSORT-based matcher to propose IDs from the previous completed frame.
+- `Suggest Detections` runs tiled YOLO inference on the current frame and maps detections back to full-frame coordinates.
+- `Accept New` adds only detector suggestions that do not overlap existing boxes.
+- `Update Detector` fine-tunes YOLO from completed saved labels. After the first model exists, later updates train only on new or changed completed labels.
+
+Detector assist is optional and uses [Ultralytics YOLO](https://docs.ultralytics.com/). GPU acceleration is used when PyTorch detects CUDA or Apple MPS; otherwise the app uses CPU. YOLOX choices are visible in the UI as planned backend options, but the built-in detector workflow currently uses YOLO11 Nano.
+
 ## Dataset Layout
 
-Place datasets under `data/`. The app expects one clip per folder:
+Place datasets under `data/`. Each dataset should be one clip folder:
 
 ```text
 data/
@@ -88,7 +80,7 @@ data/
         └── ...
 ```
 
-Large datasets are intentionally not versioned. The repo ignores `data/`, model weights, detector caches, and generated MOT exports.
+Large datasets are not versioned. The repository ignores `data/`, detector caches, generated MOT exports, and model weights.
 
 ## Label Formats
 
@@ -114,19 +106,6 @@ frame,id,x1,y1,w,h,conf,-1,-1,-1
 
 MOT frame numbers and IDs are 1-based. MOT boxes use pixel upper-left `x1,y1,width,height`.
 
-## CVIP360 Notes
-
-The local CVIP360 conversion follows the dataset README from Mazzola et al., *A dataset of annotated omnidirectional videos for distancing applications* (Journal of Imaging, 2021). Source rows contain repeated pixel `[x,y,w,h]` boxes and no explicit identities, so converted MOT IDs are assigned by box order within each annotation row.
-
-Prepared local CVIP360 copy:
-
-- `17` clips
-- `18,488` decoded `3840 x 2160` PNG frames
-- `56,074` MOT rows
-- `5` GT overlay preview images under `data/cvip360/gt_preview_samples/`
-
-Some CVIP360 videos decode to 1-2 fewer frames than their annotation rows. The converter caps `gt.txt` to the actual decoded `imgXXXX.png` count so MOT rows do not point to missing frames.
-
 ## Shortcuts
 
 | Key | Action |
@@ -146,29 +125,3 @@ Some CVIP360 videos decode to 1-2 fewer frames than their annotation rows. The c
 | Hold `Q` / `W` / `D` | Overlay previous / next / detector boxes |
 | Middle mouse | Pan while zoomed |
 | Scroll wheel | Canvas zoom |
-
-Shortcuts can be changed from the in-app Hotkeys dialog.
-
-## Project Layout
-
-```text
-FineLabelTool/
-├── app/
-│   ├── main.py
-│   ├── main_window.py
-│   ├── canvas.py
-│   ├── timeline.py
-│   ├── label_io.py
-│   └── algo/
-│       ├── detector.py
-│       └── omnisort.py
-├── data/
-├── requirements.txt
-├── requirements-detector.txt
-├── run.sh
-└── run.bat
-```
-
-## License
-
-MIT License. See [`LICENSE`](LICENSE) for details.

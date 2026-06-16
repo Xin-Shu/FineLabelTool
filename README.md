@@ -2,6 +2,20 @@
 
 A desktop PyQt5 tool for annotating image-sequence multi-object tracking datasets.
 
+## Demo
+
+<p align="center">
+  <img src="docs/screenshots/main_interface.png" width="860" alt="Main Label & Track annotation interface">
+  <br>
+  <em>Main annotation interface</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/trajectory_overlay.png" width="860" alt="Trajectory overlay view">
+  <br>
+  <em>Trajectory overlay for identity review</em>
+</p>
+
 ## Install
 
 ```bash

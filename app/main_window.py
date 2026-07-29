@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QApplication, QComboBox, QHeaderView, QKeySequenceEdit, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QScrollArea, QShortcut, QSpinBox, QSplitter, QStatusBar, QTableWidget,
+    QFileDialog, QScrollArea, QShortcut, QSpinBox, QSplitter, QStatusBar, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -58,6 +58,7 @@ class DatasetDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Select Dataset")
         self.selected: Optional[str] = None
+        self.selected_path: Optional[Path] = None
         self._datasets = list(datasets)
 
         layout = QVBoxLayout(self)
@@ -90,6 +91,8 @@ class DatasetDialog(QDialog):
         layout.addWidget(self._count_label)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        browse = btns.addButton("Select Directory...", QDialogButtonBox.ActionRole)
+        browse.clicked.connect(self._browse_directory)
         btns.accepted.connect(self._accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -156,6 +159,20 @@ class DatasetDialog(QDialog):
         item = items[0] if items else self._list.currentItem()
         if item is not None and not item.isHidden():
             self.selected = item.text()
+            self.selected_path = None
+            self.accept()
+
+    def _browse_directory(self):
+        start = str((Path.cwd() / "data").resolve()) if (Path.cwd() / "data").exists() else str(Path.home())
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Frame or Dataset Directory",
+            start,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if path:
+            self.selected = None
+            self.selected_path = Path(path)
             self.accept()
 
 
@@ -277,6 +294,7 @@ class _DetectorTrainWorker(QObject):
     def __init__(
         self,
         clip_path: Path,
+        label_dir: Optional[Path],
         frame_paths: List[Path],
         completed_indices: List[int],
         base_model: str,
@@ -285,6 +303,7 @@ class _DetectorTrainWorker(QObject):
     ):
         super().__init__()
         self.clip_path = clip_path
+        self.label_dir = label_dir
         self.frame_paths = list(frame_paths)
         self.completed_indices = list(completed_indices)
         self.base_model = base_model
@@ -297,6 +316,7 @@ class _DetectorTrainWorker(QObject):
                 self.clip_path,
                 self.frame_paths,
                 self.completed_indices,
+                label_dir=self.label_dir,
                 base_model=self.base_model,
                 epochs=self.epochs,
                 image_size=self.image_size,
@@ -340,6 +360,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Label & Track")
 
         self._clip_path: Optional[Path] = None
+        self._frame_dir: Optional[Path] = None
+        self._gt_label_dir: Optional[Path] = None
+        self._det_label_dir: Optional[Path] = None
         self._frame_paths: List[Path] = []
         self._current_index: int = 0
         self._boxes_per_frame: Dict[int, List[Box]] = {}
@@ -995,26 +1018,74 @@ class MainWindow(QMainWindow):
         if not self._handle_dirty_before_context_change("loading another dataset"):
             return
         data_dir = Path("data")
-        if not data_dir.exists():
-            self._status.showMessage("'data/' folder not found next to app/.")
-            return
-        datasets = sorted(d.name for d in data_dir.iterdir() if d.is_dir())
+        datasets = sorted(d.name for d in data_dir.iterdir() if d.is_dir()) if data_dir.exists() else []
         if not datasets:
-            self._status.showMessage("No subfolders found in 'data/'.")
-            return
+            self._status.showMessage("No datasets found under 'data/'. Use Select Directory... to browse.")
         dlg = DatasetDialog(datasets, self)
-        if dlg.exec_() == QDialog.Accepted and dlg.selected:
-            self._load_dataset(data_dir / dlg.selected)
+        if dlg.exec_() == QDialog.Accepted:
+            if dlg.selected_path is not None:
+                self._load_dataset(dlg.selected_path)
+            elif dlg.selected:
+                self._load_dataset(data_dir / dlg.selected)
+            else:
+                self._fit_main_window_to_screen()
         else:
             self._fit_main_window_to_screen()
 
-    def _load_dataset(self, clip_path: Path):
+    def _dataset_dirs(self, selected_path: Path) -> Optional[tuple[Path, Path, Path, Path, str]]:
+        selected_path = selected_path.expanduser().resolve()
+        legacy_frame_dir = selected_path / "frame"
+        if legacy_frame_dir.is_dir():
+            return (
+                selected_path,
+                legacy_frame_dir,
+                selected_path / "label_gt",
+                selected_path / "label_det",
+                selected_path.name,
+            )
+
+        if selected_path.is_dir() and any(selected_path.glob("*.png")):
+            clip_path = selected_path.parent
+            return (
+                clip_path,
+                selected_path,
+                clip_path / "label",
+                clip_path / "label_det",
+                selected_path.name,
+            )
+
+        return None
+
+    def _load_dataset(self, selected_path: Path):
+        dirs = self._dataset_dirs(selected_path)
+        if dirs is None:
+            self._status.showMessage(
+                f"No .png frames found in '{selected_path}' or '{selected_path / 'frame'}'.",
+                6000,
+            )
+            self._set_task_message("No frames", color="#b91c1c")
+            return
+
+        clip_path, frame_dir, gt_dir, det_dir, display_name = dirs
+        try:
+            gt_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Label Folder Error",
+                f"Could not create or access label folder:\n{gt_dir}\n\n{exc}",
+            )
+            self._set_task_message("Label folder error", color="#b91c1c")
+            return
+
         self._clip_path = clip_path
-        self._lbl_dataset.setText(f"Dataset: {clip_path.name}")
+        self._frame_dir = frame_dir
+        self._gt_label_dir = gt_dir
+        self._det_label_dir = det_dir
+        self._lbl_dataset.setText(f"Dataset: {display_name}")
         self._set_task_message("Scanning dataset...", active=True, color="#1d4ed8")
         QApplication.processEvents()
 
-        frame_dir = clip_path / "frame"
         self._frame_paths = sorted(frame_dir.glob("*.png"))
         if not self._frame_paths:
             self._status.showMessage(f"No .png frames found in {frame_dir}")
@@ -1035,7 +1106,6 @@ class MainWindow(QMainWindow):
         self._first_load = True
 
         # Detect previously completed frames
-        gt_dir = clip_path / "label_gt"
         first_unlabelled = 0
         found_unlabelled = False
         for i, fp in enumerate(self._frame_paths):
@@ -1059,7 +1129,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._fit_current_frame_after_layout)
         QTimer.singleShot(120, self._fit_current_frame_after_layout)
         self._status.showMessage(
-            f"Loaded {len(self._frame_paths)} frames from '{clip_path.name}'. "
+            f"Loaded {len(self._frame_paths)} frames from '{display_name}'. "
             f"Starting at frame {first_unlabelled + 1}."
         )
 
@@ -1435,8 +1505,8 @@ class MainWindow(QMainWindow):
     def _get_boxes(self, index: int) -> List[Box]:
         if index not in self._boxes_per_frame:
             stem = self._frame_paths[index].stem
-            gt_path  = self._clip_path / "label_gt"  / f"{stem}.txt"
-            det_path = self._clip_path / "label_det" / f"{stem}.txt"
+            gt_path = self._gt_path_for_index(index)
+            det_path = self._det_path_for_stem(stem)
             if gt_path.exists():
                 boxes = read_gt_labels(gt_path)
             else:
@@ -1447,7 +1517,7 @@ class MainWindow(QMainWindow):
 
     def _get_detection_boxes(self, index: int) -> List[Box]:
         stem = self._frame_paths[index].stem
-        det_path = self._clip_path / "label_det" / f"{stem}.txt"
+        det_path = self._det_path_for_stem(stem)
         boxes = read_det_labels(det_path)
         self._snap_boxes_for_index(index, boxes)
         return boxes
@@ -1659,6 +1729,7 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker = _DetectorTrainWorker(
             self._clip_path,
+            self._gt_label_dir,
             self._frame_paths,
             completed_indices,
             self._detector_base_model(),
@@ -2389,7 +2460,14 @@ class MainWindow(QMainWindow):
 
     def _gt_path_for_index(self, idx: int) -> Path:
         stem = self._frame_paths[idx].stem
+        if self._gt_label_dir is not None:
+            return self._gt_label_dir / f"{stem}.txt"
         return self._clip_path / "label_gt" / f"{stem}.txt"
+
+    def _det_path_for_stem(self, stem: str) -> Path:
+        if self._det_label_dir is not None:
+            return self._det_label_dir / f"{stem}.txt"
+        return self._clip_path / "label_det" / f"{stem}.txt"
 
     def _goto_frame_dialog(self):
         if not self._frame_paths:

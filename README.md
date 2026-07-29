@@ -42,7 +42,7 @@ python app/main.py
 
 ## Basic Workflow
 
-1. Click `Dataset...` or `Open Dataset...` and choose a dataset folder.
+1. Click `Dataset...` or `Open Dataset...` and choose a dataset folder or frame directory.
 2. Draw or edit boxes on the canvas.
 3. Assign identities in the sidebar. New IDs start from `1`.
 4. Use overlays to compare frames:
@@ -95,6 +95,8 @@ data/
 ```
 
 Large datasets are not versioned. The repository ignores `data/`, detector caches, generated MOT exports, and model weights.
+
+You can also select a frame directory directly from the startup picker. In that mode, the app reads images from the selected directory and writes labels to a sibling `label/` folder, creating it when needed.
 
 ## Label Formats
 

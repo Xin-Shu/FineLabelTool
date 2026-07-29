@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from label_io import Box, read_gt_labels
 
@@ -133,13 +133,15 @@ def _completed_label_signatures(
     clip_path: Path,
     frame_paths: Sequence[Path],
     completed_indices: Sequence[int],
+    label_dir: Optional[Path] = None,
 ) -> dict:
+    label_dir = Path(label_dir) if label_dir is not None else clip_path / "label_gt"
     signatures = {}
     for idx in sorted(set(completed_indices)):
         if idx < 0 or idx >= len(frame_paths):
             continue
         frame_path = Path(frame_paths[idx])
-        gt_path = clip_path / "label_gt" / f"{frame_path.stem}.txt"
+        gt_path = label_dir / f"{frame_path.stem}.txt"
         signature = _label_signature(gt_path)
         if signature:
             try:
@@ -159,8 +161,9 @@ def _pending_training_indices(
     clip_path: Path,
     frame_paths: Sequence[Path],
     completed_indices: Sequence[int],
+    label_dir: Optional[Path] = None,
 ) -> tuple[List[int], dict]:
-    current = _completed_label_signatures(clip_path, frame_paths, completed_indices)
+    current = _completed_label_signatures(clip_path, frame_paths, completed_indices, label_dir)
     manifest = _read_training_manifest(clip_path)
     trained_frames = manifest.get("frames", {})
     latest_exists = _usable_weight_file(trained_model_path(clip_path))
@@ -419,17 +422,19 @@ def _prepare_yolo_dataset(
     clip_path: Path,
     frame_paths: Sequence[Path],
     completed_indices: Sequence[int],
+    label_dir: Optional[Path] = None,
     tile_size: int = 640,
 ) -> tuple[Path, int, int, int]:
+    label_dir = Path(label_dir) if label_dir is not None else clip_path / "label_gt"
     root = detector_root(clip_path) / "train_data"
     image_dir = root / "images" / "train"
-    label_dir = root / "labels" / "train"
+    train_label_dir = root / "labels" / "train"
     if image_dir.exists():
         shutil.rmtree(image_dir)
-    if label_dir.exists():
-        shutil.rmtree(label_dir)
+    if train_label_dir.exists():
+        shutil.rmtree(train_label_dir)
     image_dir.mkdir(parents=True, exist_ok=True)
-    label_dir.mkdir(parents=True, exist_ok=True)
+    train_label_dir.mkdir(parents=True, exist_ok=True)
 
     train_images: List[str] = []
     frame_count = 0
@@ -439,7 +444,7 @@ def _prepare_yolo_dataset(
         if idx < 0 or idx >= len(frame_paths):
             continue
         frame_path = Path(frame_paths[idx])
-        gt_path = clip_path / "label_gt" / f"{frame_path.stem}.txt"
+        gt_path = label_dir / f"{frame_path.stem}.txt"
         boxes = [box for box in read_gt_labels(gt_path) if box.identity >= 0]
         if not boxes:
             continue
@@ -480,7 +485,7 @@ def _prepare_yolo_dataset(
 
             safe_stem = f"{idx:06d}_{frame_path.stem}_tile{tile_idx:04d}_{left}_{top}"
             image_dst = image_dir / f"{safe_stem}.png"
-            label_dst = label_dir / f"{safe_stem}.txt"
+            label_dst = train_label_dir / f"{safe_stem}.txt"
             image.crop((left, top, right, bottom)).save(image_dst)
             _write_text(label_dst, "".join(label_lines))
             train_images.append(image_dst.resolve().as_posix())
@@ -516,6 +521,7 @@ def train_detector(
     frame_paths: Sequence[Path],
     completed_indices: Sequence[int],
     *,
+    label_dir: Optional[Path] = None,
     base_model: str,
     epochs: int,
     image_size: int,
@@ -526,8 +532,8 @@ def train_detector(
     selected_device = _select_device(device)
     root = detector_root(clip_path)
     root.mkdir(parents=True, exist_ok=True)
-    pending_indices, manifest = _pending_training_indices(clip_path, frame_paths, completed_indices)
-    current_signatures = _completed_label_signatures(clip_path, frame_paths, completed_indices)
+    pending_indices, manifest = _pending_training_indices(clip_path, frame_paths, completed_indices, label_dir)
+    current_signatures = _completed_label_signatures(clip_path, frame_paths, completed_indices, label_dir)
     skipped_count = max(0, len(current_signatures) - len(pending_indices))
     latest = trained_model_path(clip_path)
     if not pending_indices and _usable_weight_file(latest):
@@ -546,6 +552,7 @@ def train_detector(
         clip_path,
         frame_paths,
         pending_indices,
+        label_dir=label_dir,
         tile_size=int(image_size),
     )
     batch_size = 8 if selected_device not in ("cpu", "mps") else 4

@@ -51,15 +51,17 @@ HOTKEY_DEFS = [
 
 
 HOTKEY_DEFAULTS = {key: default for key, _, default in HOTKEY_DEFS}
+FRAME_EXTENSIONS = ["png", "jpg", "jpeg", "bmp", "tif", "tiff"]
 
 
 class DatasetDialog(QDialog):
-    def __init__(self, datasets: List[str], parent=None):
+    def __init__(self, datasets: List[str], recent_dirs: Optional[List[str]] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Dataset")
         self.selected: Optional[str] = None
         self.selected_path: Optional[Path] = None
         self._datasets = list(datasets)
+        self._recent_dirs = list(recent_dirs or [])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 14)
@@ -77,9 +79,26 @@ class DatasetDialog(QDialog):
         self._filter.textChanged.connect(self._apply_filter)
         layout.addWidget(self._filter)
 
+        self._recent_label = QLabel("Recent directories")
+        layout.addWidget(self._recent_label)
+
+        self._recent_list = QListWidget()
+        self._recent_list.setAlternatingRowColors(True)
+        self._recent_list.setUniformItemSizes(True)
+        self._recent_list.itemDoubleClicked.connect(self._accept_recent)
+        self._recent_list.itemSelectionChanged.connect(self._clear_dataset_selection)
+        for path in self._recent_dirs:
+            item = QListWidgetItem(path)
+            item.setToolTip(path)
+            item.setData(Qt.UserRole, path)
+            item.setSizeHint(QSize(0, 32))
+            self._recent_list.addItem(item)
+        layout.addWidget(self._recent_list)
+
         self._list = QListWidget()
         self._list.setAlternatingRowColors(True)
         self._list.setUniformItemSizes(True)
+        self._list.itemSelectionChanged.connect(self._clear_recent_selection)
         for name in datasets:
             item = QListWidgetItem(name)
             item.setSizeHint(QSize(0, 36))
@@ -116,8 +135,21 @@ class DatasetDialog(QDialog):
                 background: #edf5ff;
             }
         """)
+        if not self._recent_dirs:
+            self._recent_label.hide()
+            self._recent_list.hide()
+        else:
+            self._recent_list.setMaximumHeight(120)
         self._fit_to_screen()
         self._apply_filter("")
+
+    def _clear_dataset_selection(self):
+        if self._recent_list.selectedItems():
+            self._list.clearSelection()
+
+    def _clear_recent_selection(self):
+        if self._list.selectedItems():
+            self._recent_list.clearSelection()
 
     def _fit_to_screen(self):
         screen = self.screen() or QApplication.primaryScreen()
@@ -155,12 +187,23 @@ class DatasetDialog(QDialog):
         self._count_label.setText(f"{visible} dataset(s)")
 
     def _accept(self):
+        recent_items = self._recent_list.selectedItems()
+        if recent_items:
+            self.selected = None
+            self.selected_path = Path(str(recent_items[0].data(Qt.UserRole)))
+            self.accept()
+            return
         items = [item for item in self._list.selectedItems() if not item.isHidden()]
         item = items[0] if items else self._list.currentItem()
         if item is not None and not item.isHidden():
             self.selected = item.text()
             self.selected_path = None
             self.accept()
+
+    def _accept_recent(self, item: QListWidgetItem):
+        self.selected = None
+        self.selected_path = Path(str(item.data(Qt.UserRole)))
+        self.accept()
 
     def _browse_directory(self):
         start = str((Path.cwd() / "data").resolve()) if (Path.cwd() / "data").exists() else str(Path.home())
@@ -360,6 +403,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Label & Track")
 
         self._clip_path: Optional[Path] = None
+        self._selected_dataset_path: Optional[Path] = None
         self._frame_dir: Optional[Path] = None
         self._gt_label_dir: Optional[Path] = None
         self._det_label_dir: Optional[Path] = None
@@ -400,6 +444,9 @@ class MainWindow(QMainWindow):
         self._shortcuts: List[QShortcut] = []
         self._settings = QSettings("Xin-Shu", "FineLabelTool")
         self._hotkeys = self._load_hotkeys()
+        self._frame_extension = self._normalize_frame_extension(
+            str(self._settings.value("dataset/frame_extension", "png"))
+        )
         font = QApplication.font()
         self._base_font_size = font.pointSizeF() if font.pointSizeF() > 0 else 10.0
         self._ui_zoom = 1.0
@@ -503,7 +550,18 @@ class MainWindow(QMainWindow):
         self._task_progress.hide()
         btn_dataset = QPushButton("Dataset...")
         btn_dataset.clicked.connect(self._select_dataset)
+        self._frame_format = QComboBox()
+        self._frame_format.setEditable(True)
+        self._frame_format.addItems(FRAME_EXTENSIONS)
+        self._frame_format.setCurrentText(self._frame_extension)
+        self._frame_format.setFixedWidth(86)
+        self._frame_format.setToolTip("Image/frame extension. Type png, jpg, jpeg, etc. and press Enter.")
+        self._frame_format.activated.connect(lambda _=None: self._apply_frame_extension_from_ui())
+        if self._frame_format.lineEdit() is not None:
+            self._frame_format.lineEdit().returnPressed.connect(self._apply_frame_extension_from_ui)
         top.addWidget(self._lbl_dataset)
+        top.addWidget(QLabel("Format:"))
+        top.addWidget(self._frame_format)
         top.addWidget(btn_dataset)
         top.addStretch()
         top.addWidget(self._lbl_task)
@@ -1014,6 +1072,69 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ dataset
 
+    def _normalize_frame_extension(self, text: str) -> str:
+        ext = str(text or "png").strip().lower()
+        while ext.startswith("."):
+            ext = ext[1:]
+        return ext or "png"
+
+    def _frame_files(self, frame_dir: Path, extension: Optional[str] = None) -> List[Path]:
+        ext = self._normalize_frame_extension(extension or self._frame_extension)
+        suffix = f".{ext}"
+        try:
+            return sorted(path for path in frame_dir.iterdir() if path.is_file() and path.suffix.lower() == suffix)
+        except OSError:
+            return []
+
+    def _detect_frame_extension(self, frame_dir: Path) -> Optional[str]:
+        counts: Dict[str, int] = {}
+        try:
+            for path in frame_dir.iterdir():
+                if not path.is_file():
+                    continue
+                ext = self._normalize_frame_extension(path.suffix)
+                if ext in FRAME_EXTENSIONS:
+                    counts[ext] = counts.get(ext, 0) + 1
+        except OSError:
+            return None
+        if not counts:
+            return None
+        current = self._normalize_frame_extension(self._frame_extension)
+        if counts.get(current):
+            return current
+        return max(FRAME_EXTENSIONS, key=lambda ext: (counts.get(ext, 0), -FRAME_EXTENSIONS.index(ext)))
+
+    def _has_frame_images(self, frame_dir: Path) -> bool:
+        return self._detect_frame_extension(frame_dir) is not None
+
+    def _recent_dataset_dirs(self) -> List[str]:
+        raw = self._settings.value("dataset/recent_dirs", [])
+        if isinstance(raw, str):
+            values = [raw]
+        else:
+            try:
+                values = [str(value) for value in raw]
+            except TypeError:
+                values = []
+        recent = []
+        seen = set()
+        for value in values:
+            path = Path(value).expanduser()
+            key = str(path)
+            if key in seen or not path.is_dir():
+                continue
+            seen.add(key)
+            recent.append(key)
+            if len(recent) >= 8:
+                break
+        return recent
+
+    def _remember_dataset_dir(self, path: Path) -> None:
+        key = str(path.expanduser().resolve())
+        recent = [value for value in self._recent_dataset_dirs() if value != key]
+        recent.insert(0, key)
+        self._settings.setValue("dataset/recent_dirs", recent[:8])
+
     def _select_dataset(self):
         if not self._handle_dirty_before_context_change("loading another dataset"):
             return
@@ -1021,7 +1142,7 @@ class MainWindow(QMainWindow):
         datasets = sorted(d.name for d in data_dir.iterdir() if d.is_dir()) if data_dir.exists() else []
         if not datasets:
             self._status.showMessage("No datasets found under 'data/'. Use Select Directory... to browse.")
-        dlg = DatasetDialog(datasets, self)
+        dlg = DatasetDialog(datasets, self._recent_dataset_dirs(), self)
         if dlg.exec_() == QDialog.Accepted:
             if dlg.selected_path is not None:
                 self._load_dataset(dlg.selected_path)
@@ -1044,7 +1165,7 @@ class MainWindow(QMainWindow):
                 selected_path.name,
             )
 
-        if selected_path.is_dir() and any(selected_path.glob("*.png")):
+        if selected_path.is_dir() and self._has_frame_images(selected_path):
             clip_path = selected_path.parent
             return (
                 clip_path,
@@ -1056,17 +1177,51 @@ class MainWindow(QMainWindow):
 
         return None
 
-    def _load_dataset(self, selected_path: Path):
+    def _set_frame_extension_ui(self, extension: str) -> None:
+        extension = self._normalize_frame_extension(extension)
+        if self._frame_format.findText(extension, Qt.MatchFixedString) < 0:
+            self._frame_format.addItem(extension)
+        self._frame_format.setCurrentText(extension)
+
+    def _apply_frame_extension_from_ui(self):
+        extension = self._normalize_frame_extension(self._frame_format.currentText())
+        self._set_frame_extension_ui(extension)
+        if extension == self._frame_extension:
+            return
+        if not self._handle_dirty_before_context_change("changing frame format"):
+            self._set_frame_extension_ui(self._frame_extension)
+            return
+        self._frame_extension = extension
+        self._settings.setValue("dataset/frame_extension", extension)
+        if self._selected_dataset_path is not None:
+            self._load_dataset(self._selected_dataset_path, preferred_index=self._current_index)
+        else:
+            self._status.showMessage(f"Frame format set to .{extension}.", 3000)
+
+    def _load_dataset(self, selected_path: Path, preferred_index: Optional[int] = None):
         dirs = self._dataset_dirs(selected_path)
         if dirs is None:
             self._status.showMessage(
-                f"No .png frames found in '{selected_path}' or '{selected_path / 'frame'}'.",
+                f"No supported image frames found in '{selected_path}' or '{selected_path / 'frame'}'.",
                 6000,
             )
             self._set_task_message("No frames", color="#b91c1c")
             return
 
         clip_path, frame_dir, gt_dir, det_dir, display_name = dirs
+        frame_paths = self._frame_files(frame_dir)
+        if not frame_paths:
+            detected_ext = self._detect_frame_extension(frame_dir)
+            if detected_ext is not None:
+                self._frame_extension = detected_ext
+                self._settings.setValue("dataset/frame_extension", detected_ext)
+                self._set_frame_extension_ui(detected_ext)
+                frame_paths = self._frame_files(frame_dir, detected_ext)
+        if not frame_paths:
+            self._status.showMessage(f"No .{self._frame_extension} frames found in {frame_dir}", 6000)
+            self._set_task_message("No frames", color="#b91c1c")
+            return
+
         try:
             gt_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -1078,7 +1233,9 @@ class MainWindow(QMainWindow):
             self._set_task_message("Label folder error", color="#b91c1c")
             return
 
+        selected_path = selected_path.expanduser().resolve()
         self._clip_path = clip_path
+        self._selected_dataset_path = selected_path
         self._frame_dir = frame_dir
         self._gt_label_dir = gt_dir
         self._det_label_dir = det_dir
@@ -1086,11 +1243,8 @@ class MainWindow(QMainWindow):
         self._set_task_message("Scanning dataset...", active=True, color="#1d4ed8")
         QApplication.processEvents()
 
-        self._frame_paths = sorted(frame_dir.glob("*.png"))
-        if not self._frame_paths:
-            self._status.showMessage(f"No .png frames found in {frame_dir}")
-            self._set_task_message("No frames", color="#b91c1c")
-            return
+        self._frame_paths = frame_paths
+        self._remember_dataset_dir(selected_path)
 
         self._frame_load_generation += 1
         self._frame_image_cache.clear()
@@ -1115,6 +1269,8 @@ class MainWindow(QMainWindow):
             if not done and not found_unlabelled:
                 first_unlabelled = i
                 found_unlabelled = True
+        if preferred_index is not None and self._frame_paths:
+            first_unlabelled = max(0, min(int(preferred_index), len(self._frame_paths) - 1))
 
         self._configure_frame_loading_policy(first_unlabelled)
         self._timeline.load_frames(self._frame_paths, eager_index=first_unlabelled)

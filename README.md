@@ -45,14 +45,15 @@ python app/main.py
 1. Click `Dataset...` or `Open Dataset...` and choose a dataset folder or frame directory.
 2. Draw or edit boxes on the canvas.
 3. Assign identities in the sidebar. New IDs start from `1`.
-4. Use overlays to compare frames:
+4. Change the image format in the top bar when frames use `jpg`, `jpeg`, `bmp`, etc.
+5. Use overlays to compare frames:
    - hold `Q` for previous-frame boxes
    - hold `W` for next-frame boxes
    - hold `D` for detector boxes
-5. Use `Suggest IDs` to propagate IDs from the previous completed frame.
-6. Use `Suggest Detections` and `Accept New` to add detector proposals.
-7. Press `Ctrl+S` to save.
-8. Press `Ctrl+Enter` to save and mark the frame completed if sanity checks pass.
+6. Use `Suggest IDs` to propagate IDs from the previous completed frame.
+7. Use `Suggest Detections` and `Accept New` to add detector proposals.
+8. Press `Ctrl+S` to save.
+9. Press `Ctrl+Enter` to save and mark the frame completed if sanity checks pass.
 
 The app protects unsaved edits when switching datasets or closing the window.
 
@@ -97,6 +98,7 @@ data/
 Large datasets are not versioned. The repository ignores `data/`, detector caches, generated MOT exports, and model weights.
 
 You can also select a frame directory directly from the startup picker. In that mode, the app reads images from the selected directory and writes labels to a sibling `label/` folder, creating it when needed.
+The startup picker remembers recently opened directories.
 
 ## Label Formats
 

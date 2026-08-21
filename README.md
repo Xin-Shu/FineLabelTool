@@ -61,6 +61,7 @@ The app protects unsaved edits when switching datasets or closing the window.
 
 - Draw, move, resize, delete, copy, paste, and undo boxes.
 - Select all boxes on the current frame with `Ctrl+A`.
+- Select several boxes at once: `Shift`-click to add or remove one, or drag with the left button on empty image space to select every box the region touches. Hold `Shift` while dragging to add the region to the current selection. Copy, delete, and `Clear Identity` act on the whole selection.
 - Hide in-frame ID numbers while keeping box outlines visible.
 - Jump directly to unassigned boxes or disappeared-ID locations from the sidebar.
 - Show one trajectory or all trajectories seen up to the current frame.

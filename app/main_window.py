@@ -574,6 +574,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         self._canvas = ImageCanvas()
         self._canvas.box_selected.connect(self._on_box_selected)
+        self._canvas.boxes_selected.connect(self._on_multiple_boxes_selected)
         self._canvas.box_deselected.connect(self._on_box_deselected)
         self._canvas.box_change_started.connect(self._on_box_change_started)
         self._canvas.box_changed.connect(self._on_box_changed)

@@ -19,6 +19,8 @@ REFERENCE_BOX_STROKE_PX = 1.25
 HIGHLIGHT_STROKE_PX = 2.6
 HANDLE_STROKE_PX = 0.8
 DRAW_BOX_STROKE_PX = 1.45
+SELECTION_BOX_STROKE_PX = 1.4
+SELECTION_CLICK_SLOP_PX = 3.0
 TRAJECTORY_STROKE_PX = 1.8
 _H_TL, _H_TM, _H_TR = 0, 1, 2
 _H_ML, _H_MR        = 3, 4
@@ -324,6 +326,7 @@ class BoxItem(QGraphicsItem):
 
 class ImageCanvas(QGraphicsView):
     box_selected   = pyqtSignal(object)   # emits Box
+    boxes_selected = pyqtSignal(int)
     box_deselected = pyqtSignal()
     box_change_started = pyqtSignal(object)
     box_changed    = pyqtSignal(object)
@@ -371,6 +374,9 @@ class ImageCanvas(QGraphicsView):
         self._identity_labels_visible = True
         self._draw_start: Optional[QPointF] = None
         self._draw_item: Optional[QGraphicsRectItem] = None
+        self._selection_start: Optional[QPointF] = None
+        self._selection_item: Optional[QGraphicsRectItem] = None
+        self._selection_additive = False
         self._flash_timer = QTimer(self)
         self._flash_timer.setInterval(140)
         self._flash_timer.timeout.connect(self._advance_flash)
@@ -404,6 +410,9 @@ class ImageCanvas(QGraphicsView):
         self._minimap_base = None
         self._draw_item = None
         self._draw_start = None
+        self._selection_item = None
+        self._selection_start = None
+        self._selection_additive = False
         self._panning = False
         self._pan_zoom_locked = False
         self._overlay_active = False
@@ -411,6 +420,7 @@ class ImageCanvas(QGraphicsView):
 
     def clear_selection(self):
         self.stop_flash()
+        self._clear_selection_region()
         self._scene.clearSelection()
         self.box_deselected.emit()
 
@@ -425,6 +435,15 @@ class ImageCanvas(QGraphicsView):
 
     def get_selected_boxes(self) -> List[Box]:
         return [item.box for item in self._box_items if item.isSelected()]
+
+    def _emit_selection_state(self):
+        selected = [item for item in self._box_items if item.isSelected()]
+        if not selected:
+            self.box_deselected.emit()
+        elif len(selected) == 1:
+            self.box_selected.emit(selected[0].box)
+        else:
+            self.boxes_selected.emit(len(selected))
 
     def highlight_box(self, box: Box):
         self.stop_flash()
@@ -466,6 +485,9 @@ class ImageCanvas(QGraphicsView):
         self._trajectory_items.clear()
         self._draw_item = None
         self._draw_start = None
+        self._selection_item = None
+        self._selection_start = None
+        self._selection_additive = False
         self._panning = False
         self._pan_start = None
         self._pan_zoom_locked = False
@@ -620,6 +642,8 @@ class ImageCanvas(QGraphicsView):
 
     def is_interacting(self) -> bool:
         if self._panning or self._draw_mode or self._draw_item is not None:
+            return True
+        if self._selection_item is not None:
             return True
         return any(item._drag_start is not None for item in self._box_items)
 
@@ -809,12 +833,61 @@ class ImageCanvas(QGraphicsView):
             if self._draw_item is not None:
                 self._scene.removeItem(self._draw_item)
                 self._draw_item = None
+        self._clear_selection_region()
 
     def get_selected_box(self) -> Optional[Box]:
         for item in self._box_items:
             if item.isSelected():
                 return item.box
         return None
+
+    # -------------------------------------------------------- region select
+
+    def _view_scale(self) -> float:
+        transform = self.transform()
+        return max(abs(transform.m11()), abs(transform.m22()), 1e-6)
+
+    def _scene_units_for_view_pixels(self, pixels: float) -> float:
+        return max(pixels / self._view_scale(), 0.05)
+
+    def _clear_selection_region(self):
+        if self._selection_item is not None:
+            if self._selection_item.scene() is self._scene:
+                self._scene.removeItem(self._selection_item)
+            self._selection_item = None
+        self._selection_start = None
+        self._selection_additive = False
+
+    def _start_selection_region(self, event):
+        self._selection_start = self.mapToScene(event.pos())
+        self._selection_additive = bool(event.modifiers() & Qt.ShiftModifier)
+        self._selection_item = QGraphicsRectItem(QRectF(self._selection_start, self._selection_start))
+        pen = QPen(QColor(59, 130, 246))
+        pen.setWidthF(SELECTION_BOX_STROKE_PX)
+        pen.setStyle(Qt.DashLine)
+        pen.setCosmetic(True)
+        self._selection_item.setPen(pen)
+        self._selection_item.setBrush(QBrush(QColor(59, 130, 246, 36)))
+        self._selection_item.setZValue(7)
+        self._scene.addItem(self._selection_item)
+
+    def _toggle_item_selection(self, item: BoxItem):
+        item.setSelected(not item.isSelected())
+        self._emit_selection_state()
+
+    def _select_items_in_region(self, rect: QRectF, additive: bool):
+        rect = rect.normalized().intersected(self._scene.sceneRect())
+        if not additive:
+            self._scene.clearSelection()
+        slop = self._scene_units_for_view_pixels(SELECTION_CLICK_SLOP_PX)
+        if rect.width() < slop and rect.height() < slop:
+            # Treat a click without a real drag as a plain click.
+            self._emit_selection_state()
+            return
+        for item in self._box_items:
+            if item._pixel_rect().intersects(rect):
+                item.setSelected(True)
+        self._emit_selection_state()
 
     # ------------------------------------------------------------------ events
 
@@ -966,12 +1039,24 @@ class ImageCanvas(QGraphicsView):
             return
         item = self.itemAt(event.pos())
         if isinstance(item, BoxItem) and not item.is_reference:
+            if event.button() == Qt.LeftButton and event.modifiers() & Qt.ShiftModifier:
+                self._toggle_item_selection(item)
+                event.accept()
+                return
             selected = [box_item for box_item in self._box_items if box_item.isSelected()]
             if selected and item not in selected:
                 event.accept()
                 return
             self.box_selected.emit(item.box)
         else:
+            if (
+                event.button() == Qt.LeftButton
+                and self._frame_pixmap is not None
+                and not self._overlay_active
+            ):
+                self._start_selection_region(event)
+                event.accept()
+                return
             self._scene.clearSelection()
             self.box_deselected.emit()
         super().mousePressEvent(event)
@@ -984,6 +1069,12 @@ class ImageCanvas(QGraphicsView):
                 QRectF(self._draw_start, current).normalized().intersected(img_rect)
             )
             self._draw_item.setRect(rect)
+            event.accept()
+            return
+        if self._selection_item is not None and self._selection_start is not None:
+            current = self.mapToScene(event.pos())
+            rect = QRectF(self._selection_start, current).normalized().intersected(self._scene.sceneRect())
+            self._selection_item.setRect(rect)
             event.accept()
             return
         if self._panning and self._pan_start is not None:
@@ -1012,6 +1103,13 @@ class ImageCanvas(QGraphicsView):
                 )
                 snap_box_to_pixel_grid(box, self._img_w, self._img_h)
                 self.box_drawn.emit(box)
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self._selection_item is not None:
+            rect = self._selection_item.rect()
+            additive = self._selection_additive
+            self._clear_selection_region()
+            self._select_items_in_region(rect, additive)
             event.accept()
             return
         if event.button() == Qt.MiddleButton and self._panning:
